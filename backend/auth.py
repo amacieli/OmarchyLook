@@ -31,21 +31,24 @@ class AuthManager:
         self.refresh_token = None
         self.user_info = None
 
-    async def login(self) -> bool:
+    async def login(self, device_code_callback=None) -> bool:
         """Initiate Device Flow login (user sees code on screen).
 
+        Args:
+            device_code_callback: Optional callable(user_code, verification_uri) to display device code
+        
         Returns:
             True if login successful, False otherwise
         """
         try:
-            await self.acquire_token_device_flow()
+            await self.acquire_token_device_flow(device_code_callback)
             logger.info("Device Flow login successful")
             return True
         except Exception as e:
             logger.error(f"Device Flow login failed: {e}")
             return False
 
-    async def acquire_token_device_flow(self) -> dict:
+    async def acquire_token_device_flow(self, device_code_callback=None) -> dict:
         """Acquire token via Device Flow OAuth.
 
         User sees a code and verification URL on screen, logs in on any device,
@@ -75,15 +78,20 @@ class AuthManager:
             expires_in = device_data["expires_in"]
             interval = device_data.get("interval", 5)
 
-            print(f"\n{'='*70}")
-            print(f"🔐 Device Login Required")
-            print(f"{'='*70}")
-            print(f"1. Open this URL on any device (phone, tablet, another computer):")
-            print(f"   → {verification_uri}")
-            print(f"2. Enter this code when prompted:")
-            print(f"   → {user_code}")
-            print(f"\nWaiting for authentication...")
-            print(f"{'='*70}\n")
+            # If callback provided, use it to display code (for QML integration)
+            if device_code_callback:
+                device_code_callback(user_code, verification_uri)
+            else:
+                # Otherwise print to terminal (for CLI/testing)
+                print(f"\n{'='*70}")
+                print(f"🔐 Device Login Required")
+                print(f"{'='*70}")
+                print(f"1. Open this URL on any device (phone, tablet, another computer):")
+                print(f"   → {verification_uri}")
+                print(f"2. Enter this code when prompted:")
+                print(f"   → {user_code}")
+                print(f"\nWaiting for authentication...")
+                print(f"{'='*70}\n")
 
             # Step 2: Poll for token
             token_url = (

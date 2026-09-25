@@ -25,23 +25,24 @@ ApplicationWindow {
     readonly property string fontUI: "Inter"
     readonly property string fontMono: "JetBrains Mono"
 
+    // Defer sourceComponent until authBridge is available (loaded from context)
     Loader {
         id: contentLoader
         anchors.fill: parent
-        sourceComponent: authBridge.isAuthenticated ? appShellComponent : loginScreenComponent
+        sourceComponent: loginScreenComponent
     }
 
     Component {
         id: loginScreenComponent
         LoginScreen {
-            authBridge: authBridge
+            authBridge: typeof authBridge !== 'undefined' ? authBridge : null
         }
     }
 
     Component {
         id: appShellComponent
         AppShell {
-            authBridge: authBridge
+            authBridge: typeof authBridge !== 'undefined' ? authBridge : null
         }
     }
 }

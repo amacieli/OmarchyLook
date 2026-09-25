@@ -14,9 +14,10 @@ class AsyncWorker(QThread):
     loginSucceeded = Signal()
     loginFailed = Signal(str)  # error message
 
-    def __init__(self, auth_manager):
+    def __init__(self, auth_manager, device_code_callback=None):
         super().__init__()
         self.auth_manager = auth_manager
+        self.device_code_callback = device_code_callback
 
     def run(self):
         """Run Device Flow login in background thread."""
@@ -24,7 +25,7 @@ class AsyncWorker(QThread):
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            success = loop.run_until_complete(self.auth_manager.login())
+            success = loop.run_until_complete(self.auth_manager.login(self.device_code_callback))
             if success:
                 self.loginSucceeded.emit()
             else:
@@ -45,6 +46,7 @@ class AuthBridge(QObject):
     loginFailed = Signal(str)  # error message
     logoutSucceeded = Signal()
     accountChanged = Signal()
+    deviceCodeReceived = Signal(str, str)  # (user_code, verification_uri)
 
     def __init__(self, auth_manager):
         super().__init__()
@@ -78,8 +80,13 @@ class AuthBridge(QObject):
         """Initiate Device Flow login in background thread."""
         logger.info("Device Flow login initiated from QML")
 
+        # Define callback to display device code in QML
+        def device_code_callback(user_code, verification_uri):
+            logger.info(f"Device code callback: {user_code}")
+            self.deviceCodeReceived.emit(user_code, verification_uri)
+        
         # Create worker thread to run async login
-        self._worker = AsyncWorker(self.auth_manager)
+        self._worker = AsyncWorker(self.auth_manager, device_code_callback)
         self._worker.loginSucceeded.connect(self._on_login_succeeded)
         self._worker.loginFailed.connect(self._on_login_failed)
         self._worker.start()

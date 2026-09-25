@@ -40,13 +40,17 @@ def main():
 
     # Create auth bridge for QML
     auth_bridge = AuthBridge(auth_manager)
+    
+    # **CRITICAL**: Keep auth_bridge alive for the lifetime of the app
+    app.authBridge = auth_bridge
 
     # Load QML engine
     logger.info("Loading QML engine...")
     engine = QQmlApplicationEngine()
 
-    # Register auth bridge as context property for QML
-    engine.rootContext().setContextProperty("authBridge", auth_bridge)
+    # Register auth bridge as context property for QML (root level)
+    ctx = engine.rootContext()
+    ctx.setContextProperty("authBridge", auth_bridge)
 
     # Load main QML file
     qml_path = Path(__file__).parent / "qml" / "App.qml"

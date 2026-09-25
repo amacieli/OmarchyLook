@@ -78,7 +78,13 @@ Rectangle {
                 function onLoginFailed(errorMsg) {
                     loginButton.enabled = true
                     loginButton.text = "Sign in with Microsoft"
-                    errorText.text = errorMsg
+                    errorMessage.text = errorMsg || "Login failed. Please try again."
+                }
+                function onDeviceCodeReceived(userCode, verificationUri) {
+                    // Display device code dialog
+                    deviceCodeDialog.userCode = userCode
+                    deviceCodeDialog.verificationUri = verificationUri
+                    deviceCodeDialog.open()
                 }
             }
         }
@@ -111,6 +117,133 @@ Rectangle {
             Layout.alignment: Qt.AlignHCenter
             wrapMode: Text.Wrap
             Layout.fillWidth: true
+        }
+    }
+
+    // Device Code Dialog
+    Popup {
+        id: deviceCodeDialog
+        anchors.centerIn: parent
+        width: 500
+        height: 350
+        background: Rectangle {
+            color: "#1e1e1e"
+            radius: 12
+            border.color: "#333333"
+            border.width: 1
+        }
+
+        property string userCode: ""
+        property string verificationUri: ""
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 24
+            spacing: 16
+
+            // Title
+            Text {
+                text: "🔐 Device Authentication"
+                font.family: "Inter"
+                font.pixelSize: 18
+                font.weight: Font.Bold
+                color: "#ffffff"
+                Layout.fillWidth: true
+            }
+
+            // Instructions
+            Text {
+                text: "1. Open this URL on any device (phone, tablet, or another computer):"
+                font.family: "Inter"
+                font.pixelSize: 13
+                color: "#cccccc"
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+
+            // Verification URI
+            Rectangle {
+                Layout.fillWidth: true
+                height: 44
+                color: "#2d2d2d"
+                radius: 6
+                border.color: "#444444"
+                border.width: 1
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    spacing: 8
+
+                    Text {
+                        text: deviceCodeDialog.verificationUri
+                        font.family: "Courier"
+                        font.pixelSize: 12
+                        color: "#7c6af7"
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                    }
+
+                    Button {
+                        text: "Copy"
+                        font.pixelSize: 11
+                        onClicked: {
+                            // Copy to clipboard (would need QClipboard integration)
+                            console.log("Copy URL:", deviceCodeDialog.verificationUri)
+                        }
+                    }
+                }
+            }
+
+            // Instructions 2
+            Text {
+                text: "2. Enter this code when prompted:"
+                font.family: "Inter"
+                font.pixelSize: 13
+                color: "#cccccc"
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+
+            // Device Code Display
+            Rectangle {
+                Layout.fillWidth: true
+                height: 60
+                color: "#2d2d2d"
+                radius: 6
+                border.color: "#7c6af7"
+                border.width: 2
+
+                Text {
+                    anchors.centerIn: parent
+                    text: deviceCodeDialog.userCode
+                    font.family: "Courier"
+                    font.pixelSize: 28
+                    font.weight: Font.Bold
+                    color: "#7c6af7"
+                }
+            }
+
+            // Waiting message
+            Text {
+                text: "Waiting for authentication..."
+                font.family: "Inter"
+                font.pixelSize: 12
+                color: "#888888"
+                Layout.alignment: Qt.AlignHCenter
+                Layout.topMargin: 8
+            }
+
+            Layout.fillHeight: true
+
+            // Close button
+            Button {
+                text: "Cancel"
+                Layout.fillWidth: true
+                Layout.preferredHeight: 40
+
+                onClicked: deviceCodeDialog.close()
+            }
         }
     }
 }
