@@ -4,8 +4,8 @@ A native Linux desktop email/calendar/contacts/tasks client built in **Qt/QML**,
 
 ## Features (Roadmap)
 
-- ✓ Phase 1: OAuth 2.0 authentication via MSAL
-- ✓ Phase 2: App shell with navigation
+- ✓ Phase 1: Device Flow authentication (no Azure app registration needed for end users)
+- ⏳ Phase 2: App shell with navigation
 - ⏳ Phase 3: Mail module (read-only)
 - ⏳ Phase 4: Mail compose & actions
 - ⏳ Phase 5: Categories
@@ -23,12 +23,10 @@ omarchy-look/
 ├── qml/                    # QML UI layer
 │   └── App.qml            # Main window
 ├── backend/               # Python backend
-│   ├── auth.py            # MSAL authentication
+│   ├── auth.py            # Device Flow authentication
 │   ├── graph_client.py    # Graph API wrapper
 │   ├── bridges.py         # QML ↔ Python interface
 │   └── __init__.py
-├── DESIGN.md              # Full architecture spec
-├── PLAN.md                # Phased implementation plan
 └── README.md              # This file
 ```
 
@@ -41,48 +39,43 @@ omarchy-look/
 ## Setup
 
 1. **Clone and set up environment**
-   ```
+   ```bash
    cd /mnt/ai/projects/omarchy-look
-   uv venv
-   source .venv/bin/activate  # or .venv/Scripts/activate on Windows
-   uv pip install -e .
+   ./setup.sh
    ```
 
-2. **Azure App Registration** (One-time setup)
-   - Go to [portal.azure.com](https://portal.azure.com)
-   - New App Registration → "omarchy-look"
-   - Platform: Mobile and desktop application
-   - Redirect URI: `http://localhost`
-   - Required scopes: `User.Read`, `Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Contacts.ReadWrite`, `Tasks.ReadWrite`, `offline_access`
-   - Copy `client_id` and `tenant_id`
-
-3. **Configure**
-   ```
-   cp .env.example .env
-   # Edit .env with your AZURE_CLIENT_ID and AZURE_TENANT_ID
-   ```
-
-4. **Run**
-   ```
+2. **Run** (that's it — no Azure app registration needed!)
+   ```bash
    python main.py
    ```
 
+3. **Login**
+   - You'll see a device code on screen
+   - Open the URL in any browser on any device
+   - Enter the code
+   - Authenticate with your Microsoft 365 account
+   - Done — token is cached locally
+
 ## Documentation
 
-- **DESIGN.md** — Full architecture, endpoints, UI layout, error handling
-- **PLAN.md** — Phase-by-phase implementation roadmap (1–9 phases, ~15–22 sessions total)
+Internal planning docs (design, phased roadmap, initial spec) are in `/mnt/ai/projects/omarchy-look-internal/` to keep this repo clean.
 
 ## Authentication Flow
 
-1. App launches and checks for cached authentication
+**No Azure app registration required for end users.** The app uses Microsoft's public client ID (the same one used by Outlook desktop and Teams).
+
+1. App launches and checks for cached token
 2. If none found, shows login screen
-3. User clicks "Sign in with Microsoft"
-4. Browser opens to Microsoft identity platform
-5. After login, browser redirects to loopback with auth code
-6. MSAL exchanges code for access + refresh tokens
-7. Tokens cached in OS keyring (SecretService/KWallet on Linux)
-8. App displays user's name in top bar
-9. On relaunch, tokens refresh silently
+3. User clicks "Sign in"
+4. **Device Flow** appears:
+   - User sees a code on screen
+   - Opens URL on any device (phone, tablet, browser)
+   - Enters code and authenticates with Microsoft 365
+5. Access + refresh tokens cached in OS keyring (SecretService/KWallet on Linux)
+6. App displays user's name in top bar
+7. On relaunch, tokens refresh silently from cache
+
+This is how **Thunderbird**, **New Outlook desktop**, and other native mail clients work — seamless for end users.
 
 ## Tech Stack
 
@@ -90,10 +83,10 @@ omarchy-look/
 |-------|-----------|
 | UI framework | Qt 6 / QML |
 | Backend | Python 3.10+ with PySide6 |
-| Auth | MSAL Python (msal library) |
+| Auth | Device Flow OAuth (httpx) |
 | API client | httpx (async) |
 | Cache | SQLite (aiosqlite) |
-| Build | pyproject.toml + uv |
+| Build | pyproject.toml + venv |
 
 ## Keyboard Shortcuts (Phase 2+)
 
@@ -105,6 +98,7 @@ omarchy-look/
 ## Development Notes
 
 - **No Electron.** This is a real, native Qt application.
+- **No Azure setup for users.** Uses Microsoft's public client ID.
 - **Offline-capable.** All data cached locally; syncs on reconnect.
 - **Graph-only.** No IMAP/SMTP — all via Microsoft Graph REST API.
 - **Keyboard-first.** Full keybinding coverage; mouse optional.
@@ -112,9 +106,8 @@ omarchy-look/
 
 ## References
 
-- [Microsoft identity platform](https://learn.microsoft.com/azure/active-directory/develop/v2-overview)
+- [Microsoft Device Flow auth](https://learn.microsoft.com/azure/active-directory/develop/v2-oauth2-device-code)
 - [Microsoft Graph overview](https://learn.microsoft.com/graph/overview)
-- [MSAL Python](https://learn.microsoft.com/azure/active-directory/develop/msal-overview)
 - [PySide6 docs](https://doc.qt.io/qtforpython-6/)
 - [Qt QML docs](https://doc.qt.io/qt-6/qtqml-index.html)
 
