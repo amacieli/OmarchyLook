@@ -21,20 +21,11 @@ logger = logging.getLogger(__name__)
 
 def main():
     """Launch the application."""
-    # Load environment variables from .env
+    # Load environment variables from .env (optional now)
     env_path = Path(__file__).parent / ".env"
     load_dotenv(env_path)
 
-    # Get credentials from environment
-    client_id = os.getenv("AZURE_CLIENT_ID")
-    tenant_id = os.getenv("AZURE_TENANT_ID")
-
-    if not client_id or not tenant_id:
-        print("Error: AZURE_CLIENT_ID and AZURE_TENANT_ID must be set in .env")
-        print("See .env.example for instructions.")
-        sys.exit(1)
-
-    logger.info(f"Starting omarchy-look with client_id={client_id[:10]}...")
+    logger.info("Starting omarchy-look...")
 
     # Initialize Qt application
     app = QApplication(sys.argv)
@@ -43,9 +34,9 @@ def main():
     app.setApplicationName("omarchy-look")
     app.setApplicationVersion("0.1.0")
 
-    # Initialize authentication
+    # Initialize authentication (no credentials needed; uses public client ID)
     logger.info("Initializing authentication...")
-    auth_manager = AuthManager(client_id=client_id, tenant_id=tenant_id)
+    auth_manager = AuthManager()
 
     # Create auth bridge for QML
     auth_bridge = AuthBridge(auth_manager)

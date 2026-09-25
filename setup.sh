@@ -17,16 +17,20 @@ if [ ! -d ".venv" ]; then
     python3 -m venv .venv
 fi
 
-# Activate venv
-source .venv/bin/activate || . .venv/Scripts/activate
+# Activate venv (continue even if activation fails; pip will use it)
+if [ -f .venv/bin/activate ]; then
+    source .venv/bin/activate
+elif [ -f .venv/Scripts/activate ]; then
+    . .venv/Scripts/activate
+fi
 
 # Upgrade pip
 echo "Upgrading pip..."
-pip install --upgrade pip
+.venv/bin/pip install --upgrade pip
 
 # Install dependencies
 echo "Installing dependencies..."
-pip install -e .
+.venv/bin/pip install -e .
 
 # Copy .env.example to .env if not present
 if [ ! -f ".env" ]; then
