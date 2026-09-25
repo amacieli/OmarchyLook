@@ -27,12 +27,28 @@ ApplicationWindow {
 
     // Store authBridge reference for Components to access
     property var authBridgeRef: typeof authBridge !== 'undefined' ? authBridge : null
+    
+    // Track auth state to switch between login and app shell
+    property bool isAuthenticated: false
 
     // Defer sourceComponent until authBridge is available (loaded from context)
     Loader {
         id: contentLoader
         anchors.fill: parent
-        sourceComponent: loginScreenComponent
+        sourceComponent: isAuthenticated ? appShellComponent : loginScreenComponent
+    }
+
+    // Listen for auth state changes
+    Connections {
+        target: authBridgeRef
+        function onLoginSucceeded() {
+            console.log("App.qml: Auth succeeded, switching to AppShell")
+            root.isAuthenticated = true
+        }
+        function onLogoutSucceeded() {
+            console.log("App.qml: Logout succeeded, switching to LoginScreen")
+            root.isAuthenticated = false
+        }
     }
 
     Component {
