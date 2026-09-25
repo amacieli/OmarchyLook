@@ -10,10 +10,10 @@ Rectangle {
     property var settingsManagerRef: typeof settingsManager !== 'undefined' ? settingsManager : null
 
     // Use system monospace font (respects terminal font settings)
-    readonly property string monoFont: settingsManagerRef ? settingsManagerRef.get_font_family() : "monospace"
-    readonly property int baseSize: settingsManagerRef ? settingsManagerRef.get_font_base_size() : 10
-    readonly property int titleSize: settingsManagerRef ? settingsManagerRef.get_title_size() : 12
-    readonly property int hintSize: settingsManagerRef ? settingsManagerRef.get_hint_size() : 8
+    property string monoFont: settingsManagerRef ? settingsManagerRef.get_font_family() : "monospace"
+    property int baseSize: settingsManagerRef ? settingsManagerRef.get_base_size() : 10
+    property int titleSize: settingsManagerRef ? settingsManagerRef.get_title_size() : 12
+    property int hintSize: settingsManagerRef ? settingsManagerRef.get_hint_size() : 8
 
     ColumnLayout {
         anchors.centerIn: parent
@@ -25,9 +25,11 @@ Rectangle {
         Connections {
             target: root.settingsManagerRef
             function onFontSettingsChanged() {
-                // Force property updates
-                root.monoFont = root.settingsManagerRef ? root.settingsManagerRef.get_font_family() : "monospace"
-                // Note: baseSize, titleSize, hintSize will auto-update via binding
+                console.log("LoginScreen.qml: Font settings changed, updating properties")
+                root.monoFont = settingsManagerRef ? settingsManagerRef.get_font_family() : "monospace"
+                root.baseSize = settingsManagerRef ? settingsManagerRef.get_base_size() : 10
+                root.titleSize = settingsManagerRef ? settingsManagerRef.get_title_size() : 12
+                root.hintSize = settingsManagerRef ? settingsManagerRef.get_hint_size() : 8
             }
         }
 

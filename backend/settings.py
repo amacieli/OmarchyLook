@@ -95,12 +95,12 @@ class SettingsManager(QObject):
         """Initialize settings manager.
 
         Args:
-            config_dir: Config directory path. Defaults to ~/.config/omarchy/
+            config_dir: Config directory path. Defaults to ~/.config/omarchylook/
         """
         super().__init__()
-        self._config_dir = config_dir or Path.home() / ".config" / "omarchy"
+        self._config_dir = config_dir or Path.home() / ".config" / "omarchylook"
         self._config_dir.mkdir(parents=True, exist_ok=True)
-        self._settings_file = self._config_dir / "omarchylook.toml"
+        self._settings_file = self._config_dir / "settings.toml"
         self._settings: Settings = Settings()
         self._watch_thread: Optional[Thread] = None
         self._watching = False
@@ -173,8 +173,13 @@ class SettingsManager(QObject):
     # Getter properties for QML
     @Slot(result=int)
     def get_font_base_size(self) -> int:
-        """Get current font base size."""
+        """Get current font base size (unscaled)."""
         return self._settings.font.base_size
+
+    @Slot(result=int)
+    def get_base_size(self) -> int:
+        """Get current scaled base font size (used for QML)."""
+        return self._settings.font.get_scaled_size()
 
     @Slot(result=float)
     def get_font_scale_factor(self) -> float:
