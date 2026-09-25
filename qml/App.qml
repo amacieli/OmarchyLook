@@ -7,10 +7,10 @@ ApplicationWindow {
     visible: true
     width: 1280
     height: 800
-    title: "omarchy-look"
+    title: "OmarchyLook"
 
-    // Omarchy color palette
-    readonly property color bgDark: "#1a1a1a"
+    // TUI color palette
+    readonly property color bgDark: "#0d0d0d"
     readonly property color bgSurface: "#242424"
     readonly property color colorBorder: "#333333"
     readonly property color textPrimary: "#e8e8e8"
