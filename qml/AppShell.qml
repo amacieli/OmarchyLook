@@ -7,19 +7,32 @@ Rectangle {
     color: "#0d0d0d"
 
     required property var authBridge
+    property var settingsManagerRef: typeof settingsManager !== 'undefined' ? settingsManager : null
 
     // Use system monospace font (respects terminal font settings)
-    readonly property string monoFont: "Courier"
+    readonly property string monoFont: settingsManagerRef ? settingsManagerRef.get_font_family() : "monospace"
+    readonly property int baseSize: settingsManagerRef ? settingsManagerRef.get_font_base_size() : 10
+    readonly property int titleSize: settingsManagerRef ? settingsManagerRef.get_title_size() : 12
+    readonly property int hintSize: settingsManagerRef ? settingsManagerRef.get_hint_size() : 8
 
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 0
         spacing: 0
 
+        // Listen for settings changes
+        Connections {
+            target: root.settingsManagerRef
+            function onFontSettingsChanged() {
+                console.log("AppShell.qml: Font settings changed")
+                // Font properties update via binding automatically
+            }
+        }
+
         // Top bar with TUI style
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 40
+            Layout.preferredHeight: Math.round(baseSize * 3.2)
             color: "#0d0d0d"
             border.color: "#7c6af7"
             border.width: 1
@@ -30,9 +43,9 @@ Rectangle {
                 spacing: 16
 
                 Text {
-                    text: "  ◆ OmarchyLook"
+                    text: "OmarchyLook"
                     font.family: root.monoFont
-                    font.pixelSize: 12
+                    font.pixelSize: root.titleSize
                     font.weight: Font.Bold
                     color: "#7c6af7"
                     Layout.fillWidth: true
@@ -41,7 +54,7 @@ Rectangle {
                 Text {
                     text: "📧 [m]ail  📅 [c]alendar  👥 [p]hotos  ✓ [t]asks  |  [?] help  [q] quit"
                     font.family: root.monoFont
-                    font.pixelSize: 9
+                    font.pixelSize: root.baseSize
                     color: "#888888"
                     Layout.fillWidth: true
                     Layout.alignment: Qt.AlignRight
@@ -69,16 +82,16 @@ Rectangle {
                     // Nav header
                     Rectangle {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 28
+                        Layout.preferredHeight: root.titleSize
                         color: "#1a1a1a"
                         border.color: "#7c6af7"
                         border.width: 1
 
                         Text {
                             anchors.centerIn: parent
-                            text: "  ◆ NAVIGATION"
+                            text: "NAVIGATION"
                             font.family: root.monoFont
-                            font.pixelSize: 10
+                            font.pixelSize: root.baseSize
                             font.bold: true
                             color: "#7c6af7"
                         }
@@ -100,7 +113,7 @@ Rectangle {
                             anchors.centerIn: parent
                             text: "  [M] Mail"
                             font.family: root.monoFont
-                            font.pixelSize: 10
+                            font.pixelSize: root.baseSize
                             color: "#7c6af7"
                         }
 
@@ -128,7 +141,7 @@ Rectangle {
                             anchors.centerIn: parent
                             text: "  [C] Calendar"
                             font.family: root.monoFont
-                            font.pixelSize: 10
+                            font.pixelSize: root.baseSize
                             color: "#666666"
                         }
 
@@ -156,7 +169,7 @@ Rectangle {
                             anchors.centerIn: parent
                             text: "  [P] Contacts"
                             font.family: root.monoFont
-                            font.pixelSize: 10
+                            font.pixelSize: root.baseSize
                             color: "#666666"
                         }
 
@@ -184,7 +197,7 @@ Rectangle {
                             anchors.centerIn: parent
                             text: "  [T] Tasks"
                             font.family: root.monoFont
-                            font.pixelSize: 10
+                            font.pixelSize: root.baseSize
                             color: "#666666"
                         }
 
@@ -212,7 +225,7 @@ Rectangle {
                             anchors.centerIn: parent
                             text: "  ✕ Logout  "
                             font.family: root.monoFont
-                            font.pixelSize: 10
+                            font.pixelSize: root.baseSize
                             color: logoutMouse.containsMouse ? "#ff8787" : "#7c6af7"
                         }
 
@@ -246,7 +259,7 @@ Rectangle {
                     Text {
                         text: "┌─ Mail (Phase 2 Placeholder) ─┐"
                         font.family: root.monoFont
-                        font.pixelSize: 11
+                        font.pixelSize: root.baseSize
                         color: "#7c6af7"
                         Layout.alignment: Qt.AlignHCenter
                     }
@@ -254,7 +267,7 @@ Rectangle {
                     Text {
                         text: "Navigation modules loading...\nKeyboard shortcuts: [M]ail, [C]alendar, [P]hotos, [T]asks"
                         font.family: root.monoFont
-                        font.pixelSize: 10
+                        font.pixelSize: root.baseSize
                         color: "#cccccc"
                         wrapMode: Text.Wrap
                         Layout.fillWidth: true
@@ -265,7 +278,7 @@ Rectangle {
                     Text {
                         text: "┌──────────────────────────────┐"
                         font.family: root.monoFont
-                        font.pixelSize: 11
+                        font.pixelSize: root.baseSize
                         color: "#7c6af7"
                         Layout.alignment: Qt.AlignHCenter
                     }
@@ -273,7 +286,7 @@ Rectangle {
                     Text {
                         text: "Phase 3 coming soon: Email list, message view, calendar, contacts, task management"
                         font.family: root.monoFont
-                        font.pixelSize: 9
+                        font.pixelSize: root.baseSize
                         color: "#888888"
                         horizontalAlignment: Text.AlignHCenter
                         Layout.fillWidth: true
@@ -282,7 +295,7 @@ Rectangle {
                     Text {
                         text: "└──────────────────────────────┘"
                         font.family: root.monoFont
-                        font.pixelSize: 11
+                        font.pixelSize: root.baseSize
                         color: "#7c6af7"
                         Layout.alignment: Qt.AlignHCenter
                     }

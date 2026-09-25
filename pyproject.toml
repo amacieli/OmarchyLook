@@ -16,6 +16,8 @@ dependencies = [
     "keyring>=24.3.0",
     "pydantic>=2.5.0",
     "python-dotenv>=1.0.0",
+    "watchfiles>=0.21.0",
+    "tomli-w>=1.0.0",
 ]
 
 [project.optional-dependencies]

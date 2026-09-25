@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtQml import QQmlApplicationEngine
 
 from backend import AuthManager, AuthBridge
+from backend.settings import SettingsManager
 
 # Configure logging
 logging.basicConfig(
@@ -41,8 +42,13 @@ def main():
     # Create auth bridge for QML
     auth_bridge = AuthBridge(auth_manager)
     
-    # **CRITICAL**: Keep auth_bridge alive for the lifetime of the app
+    # Initialize settings manager
+    logger.info("Initializing settings...")
+    settings_manager = SettingsManager()
+    
+    # **CRITICAL**: Keep auth_bridge and settings_manager alive for the lifetime of the app
     app.authBridge = auth_bridge
+    app.settingsManager = settings_manager
 
     # Load QML engine
     logger.info("Loading QML engine...")
@@ -51,6 +57,7 @@ def main():
     # Register auth bridge as context property for QML (root level)
     ctx = engine.rootContext()
     ctx.setContextProperty("authBridge", auth_bridge)
+    ctx.setContextProperty("settingsManager", settings_manager)
 
     # Load main QML file
     qml_path = Path(__file__).parent / "qml" / "App.qml"

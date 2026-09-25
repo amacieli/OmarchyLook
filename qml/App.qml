@@ -5,22 +5,22 @@ import QtQuick.Layouts
 ApplicationWindow {
     id: root
     visible: true
-    width: 1280
-    height: 800
+    width: settingsManager.get_ui_window_width()
+    height: settingsManager.get_ui_window_height()
     title: "OmarchyLook"
 
-    // TUI color palette
-    readonly property color bgDark: "#0d0d0d"
-    readonly property color bgSurface: "#242424"
-    readonly property color colorBorder: "#333333"
-    readonly property color textPrimary: "#e8e8e8"
-    readonly property color textSecondary: "#888888"
-    readonly property color accentPurple: "#7c6af7"
-    readonly property color dangerRed: "#ff6b6b"
-    readonly property color successGreen: "#51cf66"
+    // Settings reference
+    property var settingsManagerRef: typeof settingsManager !== 'undefined' ? settingsManager : null
 
-    // Font families - use system monospace font
-    readonly property string fontMono: "Courier"
+    // TUI color palette (from settings)
+    readonly property color bgDark: settingsManagerRef ? settingsManagerRef.get_color_bg_dark() : "#0d0d0d"
+    readonly property color bgSurface: settingsManagerRef ? settingsManagerRef.get_color_bg_surface() : "#242424"
+    readonly property color colorBorder: settingsManagerRef ? settingsManagerRef.get_color_border() : "#333333"
+    readonly property color textPrimary: settingsManagerRef ? settingsManagerRef.get_color_text_primary() : "#e8e8e8"
+    readonly property color textSecondary: settingsManagerRef ? settingsManagerRef.get_color_text_secondary() : "#888888"
+    readonly property color accentPurple: settingsManagerRef ? settingsManagerRef.get_color_accent_purple() : "#7c6af7"
+    readonly property color dangerRed: settingsManagerRef ? settingsManagerRef.get_color_danger_red() : "#ff6b6b"
+    readonly property color successGreen: settingsManagerRef ? settingsManagerRef.get_color_success_green() : "#51cf66"
 
     color: bgDark
 
@@ -47,6 +47,16 @@ ApplicationWindow {
         function onLogoutSucceeded() {
             console.log("App.qml: Logout succeeded, switching to LoginScreen")
             root.isAuthenticated = false
+        }
+    }
+
+    // Listen for settings changes to reload UI
+    Connections {
+        target: settingsManagerRef
+        function onSettingsChanged() {
+            console.log("App.qml: Settings changed, refreshing UI")
+            // Force repaint by toggling visibility
+            root.update()
         }
     }
 

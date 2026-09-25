@@ -8,17 +8,31 @@ Rectangle {
     height: 48
 
     required property var authBridge
+    property var settingsManagerRef: typeof settingsManager !== 'undefined' ? settingsManager : null
+
+    readonly property string monoFont: settingsManagerRef ? settingsManagerRef.get_font_family() : "monospace"
+    readonly property int baseSize: settingsManagerRef ? settingsManagerRef.get_font_base_size() : 10
+    readonly property int titleSize: settingsManagerRef ? settingsManagerRef.get_title_size() : 12
+    readonly property int hintSize: settingsManagerRef ? settingsManagerRef.get_hint_size() : 8
 
     RowLayout {
         anchors.fill: parent
         anchors.margins: 8
         spacing: 12
 
+        // Listen for settings changes
+        Connections {
+            target: root.settingsManagerRef
+            function onFontSettingsChanged() {
+                console.log("TopBar.qml: Font settings changed")
+            }
+        }
+
         // App title
         Text {
-            text: "omarchy-look"
+            text: "OmarchyLook"
             font.family: "Inter"
-            font.pixelSize: 14
+            font.pixelSize: root.titleSize
             font.weight: Font.Bold
             color: "#e8e8e8"
         }
@@ -38,7 +52,7 @@ Rectangle {
                 anchors.centerIn: parent
                 text: "Search... (Ctrl+K)"
                 font.family: "Inter"
-                font.pixelSize: 12
+                font.pixelSize: root.titleSize
                 color: "#888888"
             }
         }
@@ -69,7 +83,7 @@ Rectangle {
                 anchors.centerIn: parent
                 text: authBridge.getFirstLetterAvatar()
                 font.family: "Inter"
-                font.pixelSize: 14
+                font.pixelSize: root.titleSize
                 font.weight: Font.Bold
                 color: "#ffffff"
             }
@@ -99,7 +113,7 @@ Rectangle {
                     contentItem: Text {
                         text: parent.text
                         font.family: "Inter"
-                        font.pixelSize: 11
+                        font.pixelSize: root.baseSize
                         color: "#888888"
                         leftPadding: 8
                     }
@@ -118,7 +132,7 @@ Rectangle {
                     contentItem: Text {
                         text: parent.text
                         font.family: "Inter"
-                        font.pixelSize: 12
+                        font.pixelSize: root.baseSize
                         color: "#e8e8e8"
                         leftPadding: 8
                     }
@@ -135,7 +149,7 @@ Rectangle {
                     contentItem: Text {
                         text: parent.text
                         font.family: "Inter"
-                        font.pixelSize: 12
+                        font.pixelSize: root.baseSize
                         color: "#e05c5c"
                         leftPadding: 8
                     }
