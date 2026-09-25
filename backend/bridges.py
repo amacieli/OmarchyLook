@@ -3,6 +3,7 @@ import asyncio
 import logging
 from typing import Optional, Dict
 from PySide6.QtCore import QObject, Signal, Slot, Property, QThread
+from PySide6.QtGui import QGuiApplication
 import threading
 
 logger = logging.getLogger(__name__)
@@ -25,13 +26,17 @@ class AsyncWorker(QThread):
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            success = loop.run_until_complete(self.auth_manager.login(self.device_code_callback))
-            if success:
+            logger.info("AsyncWorker: Starting Device Flow...")
+            result = loop.run_until_complete(self.auth_manager.login(self.device_code_callback))
+            logger.info(f"AsyncWorker: Device Flow returned: {type(result)} = {result is not None}")
+            if result:
+                logger.info("AsyncWorker: Emitting loginSucceeded signal")
                 self.loginSucceeded.emit()
             else:
+                logger.warning("AsyncWorker: Device Flow returned falsy result")
                 self.loginFailed.emit("Authentication failed")
         except Exception as e:
-            logger.error(f"Device Flow exception: {e}")
+            logger.error(f"Device Flow exception: {e}", exc_info=True)
             self.loginFailed.emit(str(e))
         finally:
             if loop:
@@ -130,3 +135,10 @@ class AuthBridge(QObject):
         if name:
             return name[0].upper()
         return "?"
+
+    @Slot(str)
+    def copyToClipboard(self, text: str):
+        """Copy text to system clipboard."""
+        clipboard = QGuiApplication.clipboard()
+        clipboard.setText(text)
+        logger.info(f"Copied to clipboard: {text[:20]}...")

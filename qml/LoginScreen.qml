@@ -72,15 +72,20 @@ Rectangle {
             Connections {
                 target: authBridge
                 function onLoginSucceeded() {
+                    console.log("Login succeeded signal received")
+                    deviceCodeDialog.close()
                     loginButton.enabled = true
                     loginButton.text = "Sign in with Microsoft"
                 }
                 function onLoginFailed(errorMsg) {
+                    console.log("Login failed signal received:", errorMsg)
+                    deviceCodeDialog.close()
                     loginButton.enabled = true
                     loginButton.text = "Sign in with Microsoft"
                     errorMessage.text = errorMsg || "Login failed. Please try again."
                 }
                 function onDeviceCodeReceived(userCode, verificationUri) {
+                    console.log("Device code received:", userCode)
                     // Display device code dialog
                     deviceCodeDialog.userCode = userCode
                     deviceCodeDialog.verificationUri = verificationUri
@@ -188,8 +193,19 @@ Rectangle {
                         text: "Copy"
                         font.pixelSize: 11
                         onClicked: {
-                            // Copy to clipboard (would need QClipboard integration)
-                            console.log("Copy URL:", deviceCodeDialog.verificationUri)
+                            authBridge.copyToClipboard(deviceCodeDialog.verificationUri)
+                            text = "Copied!"
+                            enabled = false
+                            timer.start()
+                        }
+                    }
+
+                    Timer {
+                        id: timer
+                        interval: 2000
+                        onTriggered: {
+                            parent.children[1].text = "Copy"
+                            parent.children[1].enabled = true
                         }
                     }
                 }
