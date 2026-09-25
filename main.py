@@ -61,6 +61,19 @@ def main():
         sys.exit(1)
 
     logger.info("Application started successfully")
+    
+    # Check if user is already authenticated (cached tokens exist)
+    if auth_manager.is_authenticated():
+        logger.info("Cached tokens found, restoring session...")
+        # Load cached tokens into the manager
+        cached_token = auth_manager._get_cached_refresh_token()
+        if cached_token:
+            auth_manager.refresh_token = cached_token
+            logger.info("Tokens restored from cache, emitting loginSucceeded signal")
+            # Emit signal to tell QML to skip login and go to app shell
+            auth_bridge.loginSucceeded.emit()
+    else:
+        logger.info("No cached tokens, showing login screen")
     sys.exit(app.exec())
 
 
