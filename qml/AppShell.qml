@@ -8,6 +8,9 @@ Rectangle {
 
     required property var authBridge
 
+    // Use system monospace font (respects terminal font settings)
+    readonly property string monoFont: "Courier"
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 0
@@ -28,7 +31,7 @@ Rectangle {
 
                 Text {
                     text: "  ◆ OmarchyLook"
-                    font.family: "JetBrains Mono"
+                    font.family: root.monoFont
                     font.pixelSize: 12
                     font.weight: Font.Bold
                     color: "#7c6af7"
@@ -36,8 +39,8 @@ Rectangle {
                 }
 
                 Text {
-                    text: "📧 [m]ail  📅 [c]alendar  👥 [c]ontacts  ✓ [t]asks  |  [?] help  [q] quit"
-                    font.family: "JetBrains Mono"
+                    text: "📧 [m]ail  📅 [c]alendar  👥 [p]hotos  ✓ [t]asks  |  [?] help  [q] quit"
+                    font.family: root.monoFont
                     font.pixelSize: 9
                     color: "#888888"
                     Layout.fillWidth: true
@@ -74,32 +77,123 @@ Rectangle {
                         Text {
                             anchors.centerIn: parent
                             text: "  ◆ NAVIGATION"
-                            font.family: "JetBrains Mono"
+                            font.family: root.monoFont
                             font.pixelSize: 10
                             font.bold: true
                             color: "#7c6af7"
                         }
                     }
 
-                    // Nav items
-                    NavItem {
-                        navText: "  [M] Mail"
-                        isActive: true
+                    // Mail nav item
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 32
+                        Layout.leftMargin: 8
+                        Layout.rightMargin: 8
+                        Layout.topMargin: 4
+
+                        color: "#0d0d0d"
+                        border.color: "#7c6af7"
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "  [M] Mail"
+                            font.family: root.monoFont
+                            font.pixelSize: 10
+                            color: "#7c6af7"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onEntered: parent.border.color = "#9f8fff"
+                            onExited: parent.border.color = "#7c6af7"
+                        }
                     }
 
-                    NavItem {
-                        navText: "  [C] Calendar"
-                        isActive: false
+                    // Calendar nav item
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 32
+                        Layout.leftMargin: 8
+                        Layout.rightMargin: 8
+                        Layout.topMargin: 4
+
+                        color: "#0d0d0d"
+                        border.color: "#333333"
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "  [C] Calendar"
+                            font.family: root.monoFont
+                            font.pixelSize: 10
+                            color: "#666666"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onEntered: parent.border.color = "#9f8fff"
+                            onExited: parent.border.color = "#333333"
+                        }
                     }
 
-                    NavItem {
-                        navText: "  [P] Contacts"
-                        isActive: false
+                    // Contacts nav item
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 32
+                        Layout.leftMargin: 8
+                        Layout.rightMargin: 8
+                        Layout.topMargin: 4
+
+                        color: "#0d0d0d"
+                        border.color: "#333333"
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "  [P] Contacts"
+                            font.family: root.monoFont
+                            font.pixelSize: 10
+                            color: "#666666"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onEntered: parent.border.color = "#9f8fff"
+                            onExited: parent.border.color = "#333333"
+                        }
                     }
 
-                    NavItem {
-                        navText: "  [T] Tasks"
-                        isActive: false
+                    // Tasks nav item
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 32
+                        Layout.leftMargin: 8
+                        Layout.rightMargin: 8
+                        Layout.topMargin: 4
+
+                        color: "#0d0d0d"
+                        border.color: "#333333"
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "  [T] Tasks"
+                            font.family: root.monoFont
+                            font.pixelSize: 10
+                            color: "#666666"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onEntered: parent.border.color = "#9f8fff"
+                            onExited: parent.border.color = "#333333"
+                        }
                     }
 
                     Item { Layout.fillHeight: true }
@@ -109,6 +203,7 @@ Rectangle {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 32
                         Layout.margins: 8
+
                         color: "#0d0d0d"
                         border.color: logoutMouse.containsMouse ? "#ff8787" : "#7c6af7"
                         border.width: 1
@@ -116,7 +211,7 @@ Rectangle {
                         Text {
                             anchors.centerIn: parent
                             text: "  ✕ Logout  "
-                            font.family: "JetBrains Mono"
+                            font.family: root.monoFont
                             font.pixelSize: 10
                             color: logoutMouse.containsMouse ? "#ff8787" : "#7c6af7"
                         }
@@ -150,7 +245,7 @@ Rectangle {
                     // Content header
                     Text {
                         text: "┌─ Mail (Phase 2 Placeholder) ─┐"
-                        font.family: "JetBrains Mono"
+                        font.family: root.monoFont
                         font.pixelSize: 11
                         color: "#7c6af7"
                         Layout.alignment: Qt.AlignHCenter
@@ -158,7 +253,7 @@ Rectangle {
 
                     Text {
                         text: "Navigation modules loading...\nKeyboard shortcuts: [M]ail, [C]alendar, [P]hotos, [T]asks"
-                        font.family: "JetBrains Mono"
+                        font.family: root.monoFont
                         font.pixelSize: 10
                         color: "#cccccc"
                         wrapMode: Text.Wrap
@@ -169,7 +264,7 @@ Rectangle {
 
                     Text {
                         text: "┌──────────────────────────────┐"
-                        font.family: "JetBrains Mono"
+                        font.family: root.monoFont
                         font.pixelSize: 11
                         color: "#7c6af7"
                         Layout.alignment: Qt.AlignHCenter
@@ -177,7 +272,7 @@ Rectangle {
 
                     Text {
                         text: "Phase 3 coming soon: Email list, message view, calendar, contacts, task management"
-                        font.family: "JetBrains Mono"
+                        font.family: root.monoFont
                         font.pixelSize: 9
                         color: "#888888"
                         horizontalAlignment: Text.AlignHCenter
@@ -186,94 +281,13 @@ Rectangle {
 
                     Text {
                         text: "└──────────────────────────────┘"
-                        font.family: "JetBrains Mono"
+                        font.family: root.monoFont
                         font.pixelSize: 11
                         color: "#7c6af7"
                         Layout.alignment: Qt.AlignHCenter
                     }
                 }
             }
-        }
-    }
-}
-
-// Reusable navigation item component
-Component {
-    id: navItemComponent
-    Rectangle {
-        property string navText: ""
-        property bool isActive: false
-
-        Layout.fillWidth: true
-        Layout.preferredHeight: 32
-        Layout.margins: 0
-        Layout.leftMargin: 8
-        Layout.rightMargin: 8
-        Layout.topMargin: 4
-
-        color: "#0d0d0d"
-        border.color: isActive ? "#7c6af7" : "#333333"
-        border.width: 1
-
-        Text {
-            anchors.centerIn: parent
-            text: navText
-            font.family: "JetBrains Mono"
-            font.pixelSize: 10
-            color: isActive ? "#7c6af7" : "#666666"
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            onEntered: parent.border.color = "#9f8fff"
-            onExited: parent.border.color = parent.isActive ? "#7c6af7" : "#333333"
-            onClicked: {
-                console.log("Nav item clicked:", navText)
-                parent.isActive = true
-            }
-        }
-    }
-}
-
-// Define NavItem as a simple placeholder rectangle
-Rectangle {
-    id: navItemPlaceholder
-    property string navText: ""
-    property bool isActive: false
-    visible: false
-}
-
-// Inline nav item for now
-Component {
-    id: navItem
-    Rectangle {
-        property alias navText: navLabel.text
-        property bool isActive: false
-
-        Layout.fillWidth: true
-        Layout.preferredHeight: 32
-        Layout.leftMargin: 8
-        Layout.rightMargin: 8
-        Layout.topMargin: 4
-
-        color: "#0d0d0d"
-        border.color: isActive ? "#7c6af7" : "#333333"
-        border.width: 1
-
-        Text {
-            id: navLabel
-            anchors.centerIn: parent
-            font.family: "JetBrains Mono"
-            font.pixelSize: 10
-            color: isActive ? "#7c6af7" : "#666666"
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            onEntered: parent.border.color = "#9f8fff"
-            onExited: parent.border.color = parent.isActive ? "#7c6af7" : "#333333"
         }
     }
 }

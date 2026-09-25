@@ -8,6 +8,9 @@ Rectangle {
 
     required property var authBridge
 
+    // Use system monospace font (respects terminal font settings)
+    readonly property string monoFont: "Courier"
+
     ColumnLayout {
         anchors.centerIn: parent
         anchors.margins: 20
@@ -17,7 +20,7 @@ Rectangle {
         // Top border
         Text {
             text: "┌─────────────────────────────────────┐"
-            font.family: "JetBrains Mono"
+            font.family: root.monoFont
             font.pixelSize: 11
             color: "#7c6af7"
             Layout.alignment: Qt.AlignHCenter
@@ -26,7 +29,7 @@ Rectangle {
         // Logo / Title
         Text {
             text: "  OmarchyLook"
-            font.family: "JetBrains Mono"
+            font.family: root.monoFont
             font.pixelSize: 14
             font.weight: Font.Bold
             color: "#7c6af7"
@@ -35,7 +38,7 @@ Rectangle {
 
         Text {
             text: "  Outlook clone for Microsoft 365"
-            font.family: "JetBrains Mono"
+            font.family: root.monoFont
             font.pixelSize: 10
             color: "#888888"
             Layout.alignment: Qt.AlignHCenter
@@ -44,7 +47,7 @@ Rectangle {
         // Divider
         Text {
             text: "├─────────────────────────────────────┤"
-            font.family: "JetBrains Mono"
+            font.family: root.monoFont
             font.pixelSize: 11
             color: "#7c6af7"
             Layout.alignment: Qt.AlignHCenter
@@ -53,7 +56,7 @@ Rectangle {
         // Description
         Text {
             text: "  Authenticate with your Microsoft 365 account\n  using Device Flow authentication."
-            font.family: "JetBrains Mono"
+            font.family: root.monoFont
             font.pixelSize: 10
             color: "#cccccc"
             wrapMode: Text.WordWrap
@@ -80,7 +83,7 @@ Rectangle {
             Text {
                 anchors.centerIn: parent
                 text: "  ▶ Sign in with Microsoft  "
-                font.family: "JetBrains Mono"
+                font.family: root.monoFont
                 font.pixelSize: 11
                 color: loginMouseArea.containsMouse ? "#9f8fff" : "#7c6af7"
             }
@@ -124,7 +127,7 @@ Rectangle {
         Text {
             id: errorMessage
             text: ""
-            font.family: "JetBrains Mono"
+            font.family: root.monoFont
             font.pixelSize: 10
             color: "#ff6b6b"
             wrapMode: Text.WordWrap
@@ -135,7 +138,7 @@ Rectangle {
         // Bottom border
         Text {
             text: "└─────────────────────────────────────┘"
-            font.family: "JetBrains Mono"
+            font.family: root.monoFont
             font.pixelSize: 11
             color: "#7c6af7"
             Layout.alignment: Qt.AlignHCenter
@@ -168,7 +171,7 @@ Rectangle {
             // Title
             Text {
                 text: "┌─ Device Code Authentication ─┐"
-                font.family: "JetBrains Mono"
+                font.family: root.monoFont
                 font.pixelSize: 11
                 color: "#7c6af7"
                 Layout.alignment: Qt.AlignHCenter
@@ -177,7 +180,7 @@ Rectangle {
             // Instructions
             Text {
                 text: "1. Go to: https://microsoft.com/devicelogin"
-                font.family: "JetBrains Mono"
+                font.family: root.monoFont
                 font.pixelSize: 10
                 color: "#cccccc"
                 Layout.fillWidth: true
@@ -185,7 +188,7 @@ Rectangle {
 
             Text {
                 text: "2. Enter this code:"
-                font.family: "JetBrains Mono"
+                font.family: root.monoFont
                 font.pixelSize: 10
                 color: "#cccccc"
                 Layout.fillWidth: true
@@ -208,7 +211,7 @@ Rectangle {
                     Text {
                         id: deviceCodeText
                         text: deviceCodeDialog.userCode
-                        font.family: "JetBrains Mono"
+                        font.family: root.monoFont
                         font.pixelSize: 24
                         font.bold: true
                         color: "#7c6af7"
@@ -218,7 +221,7 @@ Rectangle {
 
                     Text {
                         text: "Click to copy"
-                        font.family: "JetBrains Mono"
+                        font.family: root.monoFont
                         font.pixelSize: 9
                         color: "#888888"
                         horizontalAlignment: Text.AlignHCenter
@@ -240,7 +243,7 @@ Rectangle {
             Text {
                 id: copyFeedback
                 text: ""
-                font.family: "JetBrains Mono"
+                font.family: root.monoFont
                 font.pixelSize: 9
                 color: "#51cf66"
                 Layout.alignment: Qt.AlignHCenter
@@ -273,7 +276,7 @@ Rectangle {
                     Text {
                         anchors.centerIn: parent
                         text: "  ◆ Copy Code  "
-                        font.family: "JetBrains Mono"
+                        font.family: root.monoFont
                         font.pixelSize: 10
                         color: copyBtnMouse.containsMouse ? "#9f8fff" : "#7c6af7"
                     }
@@ -301,7 +304,7 @@ Rectangle {
                     Text {
                         anchors.centerIn: parent
                         text: "  ✕ Close  "
-                        font.family: "JetBrains Mono"
+                        font.family: root.monoFont
                         font.pixelSize: 10
                         color: closeBtnMouse.containsMouse ? "#ff8787" : "#7c6af7"
                     }
@@ -318,7 +321,7 @@ Rectangle {
             // Bottom border
             Text {
                 text: "└──────────────────────────────────┘"
-                font.family: "JetBrains Mono"
+                font.family: root.monoFont
                 font.pixelSize: 11
                 color: "#7c6af7"
                 Layout.alignment: Qt.AlignHCenter

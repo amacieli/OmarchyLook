@@ -16,14 +16,13 @@ ApplicationWindow {
     readonly property color textPrimary: "#e8e8e8"
     readonly property color textSecondary: "#888888"
     readonly property color accentPurple: "#7c6af7"
-    readonly property color dangerRed: "#e05c5c"
-    readonly property color successGreen: "#5cc85c"
+    readonly property color dangerRed: "#ff6b6b"
+    readonly property color successGreen: "#51cf66"
+
+    // Font families - use system monospace font
+    readonly property string fontMono: "Courier"
 
     color: bgDark
-
-    // Shared font families
-    readonly property string fontUI: "Inter"
-    readonly property string fontMono: "JetBrains Mono"
 
     // Store authBridge reference for Components to access
     property var authBridgeRef: typeof authBridge !== 'undefined' ? authBridge : null
