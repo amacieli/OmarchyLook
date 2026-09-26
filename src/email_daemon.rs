@@ -14,7 +14,7 @@ use crate::errors::Result;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::time::interval;
+use tokio::time::sleep;
 
 /// Configuration for the email daemon
 pub struct DaemonConfig {
@@ -66,20 +66,26 @@ impl EmailDaemon {
             self.config.poll_interval_secs, self.config.folder_sync_interval_secs
         );
 
-        let mut message_tick = interval(Duration::from_secs(self.config.poll_interval_secs));
         let folder_interval = Duration::from_secs(self.config.folder_sync_interval_secs);
         let mut last_folder_sync: Option<Instant> = None;
+        let mut last_message_sync: Option<Instant> = None;
+        let message_interval = Duration::from_secs(self.config.poll_interval_secs);
+
+        // Poll every 5s while waiting for auth; switch to normal interval once synced
+        let mut authenticated_once = false;
 
         loop {
-            // Check token validity before doing anything
             match self.provider.is_token_valid().await {
                 Ok(true) => {
                     debug!("Token valid, proceeding with email sync");
 
-                    // Sync folders if due (first run or interval elapsed)
+                    let is_first_run = !authenticated_once;
+                    authenticated_once = true;
+
+                    // Sync folders: on first authenticated run, or when interval elapsed
                     let should_sync_folders = last_folder_sync
                         .map(|t| t.elapsed() >= folder_interval)
-                        .unwrap_or(true); // always sync on first run
+                        .unwrap_or(true);
 
                     if should_sync_folders {
                         match self.sync_folders().await {
@@ -93,29 +99,40 @@ impl EmailDaemon {
                         }
                     }
 
-                    // Sync messages across all cached folders
-                    match self.sync_messages().await {
-                        Ok(count) => {
-                            if count > 0 {
-                                info!("Successfully synced {} new emails", count);
-                            } else {
-                                debug!("No new emails");
+                    // Sync messages: on first authenticated run, or when interval elapsed
+                    let should_sync_messages = is_first_run || last_message_sync
+                        .map(|t| t.elapsed() >= message_interval)
+                        .unwrap_or(true);
+
+                    if should_sync_messages {
+                        match self.sync_messages().await {
+                            Ok(count) => {
+                                if count > 0 {
+                                    info!("Successfully synced {} new emails", count);
+                                } else {
+                                    debug!("No new emails");
+                                }
+                                last_message_sync = Some(Instant::now());
+                            }
+                            Err(e) => {
+                                error!("Failed to sync messages: {}", e);
                             }
                         }
-                        Err(e) => {
-                            error!("Failed to sync messages: {}", e);
-                        }
                     }
+
+                    // After a successful sync, sleep for the normal poll interval
+                    tokio::time::sleep(message_interval).await;
                 }
                 Ok(false) => {
                     warn!("Auth token not valid, waiting for authentication...");
+                    // Poll every 5s while unauthenticated so we pick up login quickly
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                 }
                 Err(e) => {
                     error!("Failed to check token validity: {}", e);
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                 }
             }
-
-            message_tick.tick().await;
         }
     }
 
