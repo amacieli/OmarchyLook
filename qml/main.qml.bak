@@ -1,0 +1,619 @@
+import QtQuick
+import QtQuick.Window
+import QtQuick.Controls
+import QtQuick.Layouts
+
+Window {
+    id: root
+    
+    visible: true
+    width: 1200
+    height: 800
+    title: "OmarchyLook"
+    
+    // Default settings (will be overridden by TOML config)
+    property int baseFontSize: 14
+    property real scaleFactor: 1.0
+    property string monoFont: "JetBrainsMono Nerd Font"
+    property int normalFontSize: Math.round(baseFontSize * scaleFactor)
+    
+    // Colors from defaults
+    property color bgColor: "#0d0d0d"
+    property color bgSurface: "#242424"
+    property color borderColor: "#333333"
+    property color textColor: "#e8e8e8"
+    property color textSecondary: "#888888"
+    property color accentColor: "#7c6af7"
+    property color dangerColor: "#ff6b6b"
+    property color successColor: "#51cf66"
+    
+    Component.onCompleted: {
+        loadSettingsFromTOML()
+    }
+    
+    function loadSettingsFromTOML() {
+        // Read CONFIG_DIR environment variable set by Rust backend
+        var configDir = typeof Qt.application.environment !== "undefined" 
+            ? Qt.application.environment("CONFIG_DIR")
+            : ""
+        
+        if (configDir === "") {
+            console.warn("CONFIG_DIR not set, using defaults")
+            return
+        }
+        
+        var settingsFile = configDir + "/settings.toml"
+        var xhr = new XMLHttpRequest()
+        xhr.open("GET", "file://" + settingsFile)
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200) {
+                try {
+                    parseToml(xhr.responseText)
+                    console.log("Loaded settings from:", settingsFile)
+                } catch (e) {
+                    console.error("Failed to parse settings.toml:", e)
+                }
+            }
+        }
+        xhr.send()
+    }
+    
+    function parseToml(content) {
+        var lines = content.split("\n")
+        var currentSection = ""
+        
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i].trim()
+            
+            // Skip comments and empty lines
+            if (line === "" || line.startsWith("#")) continue
+            
+            // Parse section headers
+            if (line.startsWith("[") && line.endsWith("]")) {
+                currentSection = line.slice(1, -1).trim()
+                continue
+            }
+            
+            // Parse key=value pairs
+            var match = line.match(/^([^=]+)\s*=\s*(.+)$/)
+            if (!match) continue
+            
+            var key = match[1].trim()
+            var value = match[2].trim().replace(/^["']|["']$/g, "")
+            
+            // Font section
+            if (currentSection === "font") {
+                if (key === "family") monoFont = value
+                else if (key === "base_size") baseFontSize = parseInt(value)
+                else if (key === "scale_factor") scaleFactor = parseFloat(value)
+            }
+            // Color section
+            else if (currentSection === "color") {
+                if (key === "bg_dark") bgColor = value
+                else if (key === "bg_surface") bgSurface = value
+                else if (key === "border") borderColor = value
+                else if (key === "text_primary") textColor = value
+                else if (key === "text_secondary") textSecondary = value
+                else if (key === "accent_purple") accentColor = value
+                else if (key === "danger_red") dangerColor = value
+                else if (key === "success_green") successColor = value
+            }
+        }
+        
+        // Recalculate normalFontSize after loading
+        normalFontSize = Math.round(baseFontSize * scaleFactor)
+    }
+    
+    color: bgColor
+    
+    // Authentication state
+    // Start authenticated - go straight to main app view
+    property bool isAuthenticated: true
+    
+    // Current view state
+    property string currentView: "mail"  // "mail", "settings", or "login" (for auth flow)
+    
+    // Main content area - switch between login and app shell
+    Loader {
+        anchors.fill: parent
+        sourceComponent: root.isAuthenticated ? appShellComponent : loginScreenComponent
+    }
+    
+    // ===== Login Screen Component =====
+    Component {
+        id: loginScreenComponent
+        
+        Rectangle {
+            color: root.color
+            
+            ColumnLayout {
+                anchors.centerIn: parent
+                width: 400
+                spacing: 24
+                
+                // Title
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: "┌─ OmarchyLook ─┐"
+                    font.family: root.monoFont
+                    font.pixelSize: 14
+                    color: root.accentColor
+                }
+                
+                // Device Code Display
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 120
+                    color: "#1a1a1a"
+                    border.color: root.accentColor
+                    border.width: 1
+                    
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 8
+                        
+                        Text {
+                            text: "Device Code:"
+                            font.family: root.monoFont
+                            font.pixelSize: 11
+                            color: root.textColor
+                        }
+                        
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            color: "#0d0d0d"
+                            border.color: root.accentColor
+                            border.width: 1
+                            
+                            Text {
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                text: "XXXX-XXXX"  // TODO: Bind to AuthBridge
+                                font.family: root.monoFont
+                                font.pixelSize: 16
+                                font.bold: true
+                                color: root.successColor
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                        }
+                        
+                        Text {
+                            text: "Expires in 15 minutes"
+                            font.family: root.monoFont
+                            font.pixelSize: 10
+                            color: "#888888"
+                        }
+                    }
+                }
+                
+                // Instructions
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: "Open device.microsoft.com\nEnter code above"
+                    font.family: root.monoFont
+                    font.pixelSize: 11
+                    color: root.textColor
+                    horizontalAlignment: Text.AlignHCenter
+                }
+                
+                // Copy Button
+                Rectangle {
+                    Layout.alignment: Qt.AlignHCenter
+                    width: 200
+                    height: 40
+                    color: root.color
+                    border.color: copyMouse.containsMouse ? "#9f8fff" : root.accentColor
+                    border.width: 1
+                    
+                    Text {
+                        anchors.centerIn: parent
+                        text: "  ✓ Copy Code  "
+                        font.family: root.monoFont
+                        font.pixelSize: 12
+                        color: parent.border.color
+                    }
+                    
+                    MouseArea {
+                        id: copyMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: {
+                            console.log("Copy button clicked")
+                            // TODO: Connect to authBridge.copyToClipboard()
+                        }
+                    }
+                }
+                
+                // Waiting indicator
+                Text {
+                    Layout.alignment: Qt.AlignHCenter
+                    text: "Waiting for authentication..."
+                    font.family: root.monoFont
+                    font.pixelSize: 10
+                    color: "#666666"
+                }
+                
+                Item { Layout.fillHeight: true }
+            }
+        }
+    }
+    
+    // ===== App Shell Component =====
+    Component {
+        id: appShellComponent
+        
+        Rectangle {
+            color: root.color
+            
+            RowLayout {
+                anchors.fill: parent
+                spacing: 0
+                
+                // Sidebar
+                Rectangle {
+                    Layout.preferredWidth: 200
+                    Layout.fillHeight: true
+                    color: "#1a1a1a"
+                    border.width: 1
+                    border.color: "#000000"  // Left and top
+                    
+                    Rectangle {
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: 1
+                        color: "#7c6af7"  // Right border
+                    }
+                    
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 12
+                        
+                        Text {
+                            text: "╔═ MENU ═╗"
+                            font.family: root.monoFont
+                            font.pixelSize: 11
+                            color: root.accentColor
+                        }
+                        
+                        // Menu items
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 40
+                            color: root.currentView === "mail" ? root.accentColor : root.color
+                            border.color: root.currentView === "mail" ? root.accentColor : "#7c6af7"
+                            border.width: 1
+                            
+                            Text {
+                                anchors.centerIn: parent
+                                text: "  📧 Mail  "
+                                font.family: root.monoFont
+                                font.pixelSize: 11
+                                color: root.currentView === "mail" ? "#0d0d0d" : root.accentColor
+                            }
+                            
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: root.currentView = "mail"
+                            }
+                        }
+                        
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 40
+                            color: "#0d0d0d"
+                            border.color: "#666666"
+                            border.width: 1
+                            
+                            Text {
+                                anchors.centerIn: parent
+                                text: "  📅 Calendar  "
+                                font.family: root.monoFont
+                                font.pixelSize: 11
+                                color: "#888888"
+                            }
+                        }
+                        
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 40
+                            color: "#0d0d0d"
+                            border.color: "#666666"
+                            border.width: 1
+                            
+                            Text {
+                                anchors.centerIn: parent
+                                text: "  👥 Contacts  "
+                                font.family: root.monoFont
+                                font.pixelSize: 11
+                                color: "#888888"
+                            }
+                        }
+                        
+                        // Settings button
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 40
+                            color: root.currentView === "settings" ? root.accentColor : "#0d0d0d"
+                            border.color: root.currentView === "settings" ? root.accentColor : "#666666"
+                            border.width: 1
+                            
+                            Text {
+                                anchors.centerIn: parent
+                                text: "  ⚙️ Settings  "
+                                font.family: root.monoFont
+                                font.pixelSize: 11
+                                color: root.currentView === "settings" ? "#0d0d0d" : "#888888"
+                            }
+                            
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: root.currentView = "settings"
+                            }
+                        }
+                        
+                        Item { Layout.fillHeight: true }
+                    }
+                }
+                
+                // Main content area
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    color: root.color
+                    
+                    Loader {
+                        id: contentLoader
+                        anchors.fill: parent
+                        sourceComponent: {
+                            switch(root.currentView) {
+                                case "login": return graphLoginComponent
+                                case "settings": return settingsViewComponent
+                                default: return mailViewComponent
+                            }
+                        }
+                    }
+                }
+                
+                // Mail view component
+                Component {
+                    id: mailViewComponent
+                    
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 8
+                        
+                        // Header
+                        Text {
+                            text: "╔═ Mail Module (Phase 3) ═╗"
+                            font.family: root.monoFont
+                            font.pixelSize: 12
+                            color: root.accentColor
+                            font.bold: true
+                        }
+                        
+                        // Placeholder
+                        Text {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            text: "Mail list will load here\n\n(Phase 3 integration in progress)"
+                            font.family: root.monoFont
+                            font.pixelSize: 11
+                            color: root.textColor
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                    }
+                }
+                
+                // Graph Login/Auth Flow Component
+                Component {
+                    id: graphLoginComponent
+                    
+                    Rectangle {
+                        color: root.color
+                        
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            width: 400
+                            spacing: 24
+                            
+                            // Title
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: "┌─ Authenticate to Microsoft Graph ─┐"
+                                font.family: root.monoFont
+                                font.pixelSize: 14
+                                color: root.accentColor
+                            }
+                            
+                            // Device Code Display
+                            Rectangle {
+                                Layout.fillWidth: true
+                                height: 120
+                                color: "#1a1a1a"
+                                border.color: root.accentColor
+                                border.width: 1
+                                
+                                ColumnLayout {
+                                    anchors.fill: parent
+                                    anchors.margins: 12
+                                    spacing: 8
+                                    
+                                    Text {
+                                        text: "Device Code:"
+                                        font.family: root.monoFont
+                                        font.pixelSize: 11
+                                        color: root.textColor
+                                    }
+                                    
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        Layout.fillHeight: true
+                                        color: "#0d0d0d"
+                                        border.color: root.accentColor
+                                        border.width: 1
+                                        
+                                        Text {
+                                            anchors.fill: parent
+                                            anchors.margins: 8
+                                            text: "XXXX-XXXX"
+                                            font.family: root.monoFont
+                                            font.pixelSize: 16
+                                            font.bold: true
+                                            color: root.successColor
+                                            horizontalAlignment: Text.AlignHCenter
+                                            verticalAlignment: Text.AlignVCenter
+                                        }
+                                    }
+                                    
+                                    Text {
+                                        text: "Expires in 15 minutes"
+                                        font.family: root.monoFont
+                                        font.pixelSize: 10
+                                        color: "#888888"
+                                    }
+                                }
+                            }
+                            
+                            // Instructions
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: "Open device.microsoft.com\\nEnter code above"
+                                font.family: root.monoFont
+                                font.pixelSize: 11
+                                color: root.textColor
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                            
+                            // Copy Button
+                            Rectangle {
+                                Layout.alignment: Qt.AlignHCenter
+                                width: 200
+                                height: 40
+                                color: root.color
+                                border.color: copyMouse.containsMouse ? "#9f8fff" : root.accentColor
+                                border.width: 1
+                                
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "  ✓ Copy Code  "
+                                    font.family: root.monoFont
+                                    font.pixelSize: 12
+                                    color: parent.border.color
+                                }
+                                
+                                MouseArea {
+                                    id: copyMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    onClicked: {
+                                        console.log("Copy button clicked")
+                                    }
+                                }
+                            }
+                            
+                            // Back to Settings Button
+                            Rectangle {
+                                Layout.alignment: Qt.AlignHCenter
+                                width: 200
+                                height: 40
+                                color: root.color
+                                border.color: backMouse.containsMouse ? "#9f8fff" : "#666666"
+                                border.width: 1
+                                
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "  ← Back to Settings  "
+                                    font.family: root.monoFont
+                                    font.pixelSize: 12
+                                    color: parent.border.color
+                                }
+                                
+                                MouseArea {
+                                    id: backMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    onClicked: {
+                                        console.log("Back button clicked")
+                                        root.currentView = "settings"
+                                    }
+                                }
+                            }
+                            
+                            // Waiting indicator
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: "Waiting for authentication..."
+                                font.family: root.monoFont
+                                font.pixelSize: 10
+                                color: "#666666"
+                            }
+                            
+                            Item { Layout.fillHeight: true }
+                        }
+                    }
+                }
+                
+                // Settings view component
+                Component {
+                    id: settingsViewComponent
+                    
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        spacing: 12
+                        
+                        // Header
+                        Text {
+                            text: "╔═ Settings ═╗"
+                            font.family: root.monoFont
+                            font.pixelSize: 12
+                            color: root.accentColor
+                            font.bold: true
+                        }
+                        
+                        // Account Settings section
+                        Text {
+                            text: "📧 Account Settings"
+                            font.family: root.monoFont
+                            font.pixelSize: 11
+                            color: root.accentColor
+                        }
+                        
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 40
+                            color: root.color
+                            border.color: root.accentColor
+                            border.width: 1
+                            
+                            Text {
+                                anchors.centerIn: parent
+                                text: "  🔐 Re-authenticate with Graph API  "
+                                font.family: root.monoFont
+                                font.pixelSize: 10
+                                color: root.accentColor
+                            }
+                            
+                            MouseArea {
+                                anchors.fill: parent
+                                onClicked: {
+                                    console.log("Graph Login triggered - showing device code flow")
+                                    root.currentView = "login"
+                                }
+                            }
+                        }
+                        
+                        Item { Layout.fillHeight: true }
+                    }
+                }
+            }
+        }
+    }
+}

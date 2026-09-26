@@ -1,7 +1,7 @@
 //! SQLite database with FTS5 for local mail cache
 
 use crate::errors::{OmarchyError, Result};
-use crate::models::{CachedMessage, Message};
+use crate::models::{CachedMessage, Message, EmailMessage};
 use log::{debug, info};
 use rusqlite::{Connection, params, OptionalExtension};
 use chrono::Utc;
@@ -126,6 +126,21 @@ impl Database {
         Ok(())
     }
     
+    /// Check if email already exists in database (for deduplication)
+    pub fn email_exists(&self, id: &str) -> Result<bool> {
+        let mut stmt = self.conn.prepare(
+            "SELECT 1 FROM messages WHERE id = ?1 LIMIT 1"
+        )?;
+        
+        let exists = stmt.exists(params![id])?;
+        
+        if exists {
+            debug!("Email {} exists in database", id);
+        }
+        
+        Ok(exists)
+    }
+    
     /// Get cached message by ID
     pub fn get_message(&self, id: &str) -> Result<Option<CachedMessage>> {
         let mut stmt = self.conn.prepare(
@@ -232,5 +247,27 @@ impl Database {
         
         let count: i32 = stmt.query_row([], |row| row.get(0))?;
         Ok(count as usize)
+    }
+
+    /// Insert a new email message (used by daemon)
+    pub fn insert_email(&self, email: &EmailMessage) -> Result<()> {
+        let now = Utc::now();
+        debug!("Inserting email: {}", email.id);
+
+        self.conn.execute(
+            "INSERT OR IGNORE INTO messages (id, subject, from_email, body, received_at, is_read, cached_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                email.id,
+                email.subject,
+                email.from,
+                email.body,
+                email.received,
+                false, // new emails default to unread
+                now,
+            ],
+        )?;
+
+        Ok(())
     }
 }

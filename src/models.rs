@@ -64,6 +64,16 @@ pub struct ItemBody {
     pub content: String,
 }
 
+/// Email message for daemon storage
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EmailMessage {
+    pub id: String,
+    pub from: String,
+    pub subject: String,
+    pub received: String,
+    pub body: String,
+}
+
 /// Cached mail entry in SQLite
 #[derive(Debug, Clone)]
 pub struct CachedMessage {
@@ -155,7 +165,7 @@ impl Default for Settings {
                 animation_enabled: true,
             },
             sync: SyncSettings {
-                poll_interval_secs: 60,
+                poll_interval_secs: 120, // 2 minute polling interval for email daemon
                 auto_sync: true,
                 cache_retention_days: 30,
             },

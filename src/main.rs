@@ -4,12 +4,14 @@
 //! - Rust backend: Auth, Graph API, SQLite cache
 //! - QML frontend: Native Qt UI with hot-reload support
 
-use omarchy_look::{init_logging, AuthManager, Database, SettingsManager};
+use omarchy_look::{init_logging, AuthManager, Database, SettingsManager, email_daemon::{EmailDaemon, DaemonConfig}, providers::graph::GraphEmailProvider};
 use log::{debug, error, info, warn};
 use std::env;
 use std::path::PathBuf;
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::Arc;
+use tokio::runtime::Runtime;
 
 fn main() {
     // Initialize logging
@@ -120,7 +122,7 @@ fn launch_qml_app(config_dir: &PathBuf) {
 
 fn initialize_app(config_dir: &PathBuf, db_path: &str, settings_path: &str) -> omarchy_look::errors::Result<()> {
     // Initialize database
-    let _db = Database::open(db_path)?;
+    let db = Arc::new(Database::open(db_path)?);
     info!("Database initialized");
     
     // Initialize settings
@@ -132,6 +134,9 @@ fn initialize_app(config_dir: &PathBuf, db_path: &str, settings_path: &str) -> o
     if auth.is_authenticated() {
         info!("User already authenticated (cached tokens available)");
         auth.write_state_file(config_dir)?;
+        
+        // Note: Email daemon will start in the background thread below
+        // It will self-trigger on token availability
     } else {
         info!("User not authenticated; waiting for UI trigger");
     }
@@ -146,6 +151,12 @@ fn initialize_app(config_dir: &PathBuf, db_path: &str, settings_path: &str) -> o
     let config_dir_http = config_dir.clone();
     std::thread::spawn(move || {
         start_http_trigger_server(&config_dir_http);
+    });
+    
+    // Start email daemon in a separate thread with tokio runtime
+    let config_dir_daemon = config_dir.clone();
+    std::thread::spawn(move || {
+        start_email_daemon_thread(&config_dir_daemon);
     });
     
     Ok(())
@@ -271,4 +282,51 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
             Err(e) => warn!("HTTP trigger server accept error: {}", e),
         }
     }
+}
+
+/// Start the email daemon with its own tokio runtime
+/// This runs in a separate thread and continuously syncs emails
+fn start_email_daemon_thread(config_dir: &PathBuf) {
+    let config_dir_clone = config_dir.clone();
+    
+    // Create a new tokio runtime for this thread
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build() {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to create tokio runtime for email daemon: {}", e);
+            return;
+        }
+    };
+    
+    info!("Email daemon thread starting...");
+    
+    // Run the daemon in the tokio context
+    rt.block_on(async {
+        // Create the email provider (Graph API)
+        let auth = AuthManager::new();
+        let provider = Arc::new(omarchy_look::providers::graph::GraphEmailProvider::new(auth));
+        
+        // Open database (will be accessed synchronously from blocking context)
+        let db_path = config_dir_clone.join("messages.db");
+        let db_str = db_path.to_str().unwrap_or("messages.db").to_string();
+        let daemon_db = match Database::open(&db_str) {
+            Ok(db) => Arc::new(db),
+            Err(e) => {
+                error!("Failed to open database for email daemon: {}", e);
+                return;
+            }
+        };
+        
+        // Create the daemon with config
+        let daemon_config = DaemonConfig {
+            poll_interval_secs: 120, // 2 minutes, configurable via settings later
+            max_retries: 10,
+        };
+        let daemon = EmailDaemon::new(daemon_config, daemon_db, provider);
+        
+        // Run the daemon (this will loop indefinitely)
+        daemon.start().await;
+    });
 }

@@ -15,6 +15,8 @@ pub mod keyring_mgr;
 pub mod models;
 pub mod errors;
 pub mod qt_bridge;
+pub mod email_daemon;
+pub mod providers;
 
 pub use auth::AuthManager;
 pub use graph::GraphClient;
