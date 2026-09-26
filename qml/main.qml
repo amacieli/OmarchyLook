@@ -163,6 +163,7 @@ Window {
     // Current view state
     property string currentView: "mail"  // "mail" or "settings"
     property bool showAuthModal: false  // Show authentication modal when true
+    property bool sidebarCollapsed: false  // Sidebar collapse/expand state
     
     // Main content area - always show AppShell (auth happens in Settings page only)
     Loader {
@@ -182,13 +183,18 @@ Window {
                 anchors.fill: parent
                 spacing: 0
                 
-                // Sidebar
+                // Sidebar with collapse/expand
                 Rectangle {
-                    Layout.preferredWidth: 200
+                    Layout.preferredWidth: root.sidebarCollapsed ? 50 : 200
                     Layout.fillHeight: true
                     color: "#1a1a1a"
                     border.width: 1
                     border.color: "#000000"  // Left and top
+                    clip: true
+                    
+                    Behavior on Layout.preferredWidth {
+                        NumberAnimation { duration: 200 }
+                    }
                     
                     Rectangle {
                         anchors.right: parent.right
@@ -200,93 +206,147 @@ Window {
                     
                     ColumnLayout {
                         anchors.fill: parent
-                        anchors.margins: 12
-                        spacing: 12
+                        anchors.margins: root.sidebarCollapsed ? 4 : 12
+                        spacing: root.sidebarCollapsed ? 8 : 12
+                        
+                        // Collapse/expand button at top
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 40
+                            color: "#0d0d0d"
+                            border.color: "#7c6af7"
+                            border.width: 1
+                            
+                            Text {
+                                anchors.centerIn: parent
+                                text: root.sidebarCollapsed ? "▶" : "◀"
+                                font.family: root.monoFont
+                                font.pixelSize: 14
+                                color: root.accentColor
+                            }
+                            
+                            MouseArea {
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onEntered: parent.border.color = "#9f8fff"
+                                onExited: parent.border.color = "#7c6af7"
+                                onClicked: root.sidebarCollapsed = !root.sidebarCollapsed
+                            }
+                        }
                         
                         Text {
+                            visible: !root.sidebarCollapsed
                             text: "╔═ MENU ═╗"
                             font.family: root.monoFont
                             font.pixelSize: 11
                             color: root.accentColor
                         }
                         
-                        // Menu items
+                        // Mail button
                         Rectangle {
                             Layout.fillWidth: true
-                            height: 40
+                            Layout.preferredHeight: 40
                             color: root.currentView === "mail" ? root.accentColor : root.color
                             border.color: root.currentView === "mail" ? root.accentColor : "#7c6af7"
                             border.width: 1
                             
                             Text {
                                 anchors.centerIn: parent
-                                text: "  📧 Mail  "
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.leftMargin: 4
+                                anchors.rightMargin: 4
+                                text: root.sidebarCollapsed ? "📧" : "  📧 Mail  "
                                 font.family: root.monoFont
-                                font.pixelSize: 11
+                                font.pixelSize: root.sidebarCollapsed ? 16 : 11
                                 color: root.currentView === "mail" ? "#0d0d0d" : root.accentColor
+                                horizontalAlignment: Text.AlignHCenter
                             }
                             
                             MouseArea {
                                 anchors.fill: parent
+                                hoverEnabled: true
+                                onEntered: parent.border.color = "#9f8fff"
+                                onExited: parent.border.color = root.currentView === "mail" ? root.accentColor : "#7c6af7"
                                 onClicked: root.currentView = "mail"
                             }
                         }
                         
+                        // Calendar button
                         Rectangle {
                             Layout.fillWidth: true
-                            height: 40
+                            Layout.preferredHeight: 40
                             color: "#0d0d0d"
                             border.color: "#666666"
                             border.width: 1
                             
                             Text {
                                 anchors.centerIn: parent
-                                text: "  📅 Calendar  "
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.leftMargin: 4
+                                anchors.rightMargin: 4
+                                text: root.sidebarCollapsed ? "📅" : "  📅 Calendar  "
                                 font.family: root.monoFont
-                                font.pixelSize: 11
+                                font.pixelSize: root.sidebarCollapsed ? 16 : 11
                                 color: "#888888"
+                                horizontalAlignment: Text.AlignHCenter
                             }
                         }
                         
+                        // Contacts button
                         Rectangle {
                             Layout.fillWidth: true
-                            height: 40
+                            Layout.preferredHeight: 40
                             color: "#0d0d0d"
                             border.color: "#666666"
                             border.width: 1
                             
                             Text {
                                 anchors.centerIn: parent
-                                text: "  👥 Contacts  "
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.leftMargin: 4
+                                anchors.rightMargin: 4
+                                text: root.sidebarCollapsed ? "👥" : "  👥 Contacts  "
                                 font.family: root.monoFont
-                                font.pixelSize: 11
+                                font.pixelSize: root.sidebarCollapsed ? 16 : 11
                                 color: "#888888"
+                                horizontalAlignment: Text.AlignHCenter
                             }
                         }
                         
-                        // Settings button
+                        Item { Layout.fillHeight: true }
+                        
+                        // Settings button pinned to bottom (window-aware)
                         Rectangle {
                             Layout.fillWidth: true
-                            height: 40
+                            Layout.preferredHeight: 40
                             color: root.currentView === "settings" ? root.accentColor : "#0d0d0d"
                             border.color: root.currentView === "settings" ? root.accentColor : "#666666"
                             border.width: 1
                             
                             Text {
                                 anchors.centerIn: parent
-                                text: "  ⚙️ Settings  "
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.leftMargin: 4
+                                anchors.rightMargin: 4
+                                text: root.sidebarCollapsed ? "⚙️" : "  ⚙️ Settings  "
                                 font.family: root.monoFont
-                                font.pixelSize: 11
+                                font.pixelSize: root.sidebarCollapsed ? 16 : 11
                                 color: root.currentView === "settings" ? "#0d0d0d" : "#888888"
+                                horizontalAlignment: Text.AlignHCenter
                             }
                             
                             MouseArea {
                                 anchors.fill: parent
+                                hoverEnabled: true
+                                onEntered: parent.border.color = "#9f8fff"
+                                onExited: parent.border.color = root.currentView === "settings" ? root.accentColor : "#666666"
                                 onClicked: root.currentView = "settings"
                             }
                         }
-                        
-                        Item { Layout.fillHeight: true }
                     }
                 }
                 
