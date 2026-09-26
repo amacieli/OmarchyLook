@@ -258,6 +258,12 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                         let config_dir = config_dir.clone();
                         std::thread::spawn(move || {
                             let mut auth = AuthManager::new();
+                            // Clear any stale error from auth_state.json immediately
+                            // so QML poller doesn't keep displaying the old error
+                            let _ = std::fs::write(
+                                config_dir.join("auth_state.json"),
+                                "{\"is_authenticated\":false}",
+                            );
                             match auth.trigger_device_flow(&config_dir) {
                                 Ok(true) => info!("✅ HTTP-triggered device flow succeeded"),
                                 Ok(false) => info!("❌ HTTP-triggered device flow cancelled"),

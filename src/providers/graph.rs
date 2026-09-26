@@ -51,10 +51,16 @@ impl super::EmailProvider for GraphEmailProvider {
             .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
 
         if !response.status().is_success() {
-            error!("Graph API returned status: {}", response.status());
+            let status = response.status();
+            let err_body = response.text().await.unwrap_or_default();
+            error!("Graph API returned status: {}", status);
+            error!("Graph API error body: {}", err_body);
+            // Log token prefix so we can confirm which app/scopes were used
+            let token_preview = if token.len() > 20 { &token[..20] } else { &token };
+            error!("Token prefix (first 20 chars): {}...", token_preview);
             return Err(crate::errors::OmarchyError::HttpError(format!(
-                "Graph API error: {}",
-                response.status()
+                "Graph API error: {} — {}",
+                status, err_body
             )));
         }
 

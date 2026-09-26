@@ -3,12 +3,15 @@
 use crate::errors::{OmarchyError, Result};
 use crate::models::{DeviceFlowResponse, TokenResponse, CachedToken};
 use crate::keyring_mgr;
-use log::{info, debug, warn};
+use log::{info, debug, warn, error};
 use std::time::{SystemTime, Duration};
 
-const PUBLIC_CLIENT_ID: &str = "04b07795-8ddb-461a-bbee-02f9e1bf7b46";
+// omarchylook Azure App Registration (multi-tenant + personal accounts)
+// Registered once by the developer; all users authenticate via Device Flow with no Azure interaction.
+const PUBLIC_CLIENT_ID: &str = "9c277d6f-edb2-4f82-bda5-901b4c11c457";
 // const TENANT_ID: &str = "common";  // Unused; part of OAuth spec but not needed for public client flow
-const GRAPH_SCOPE: &str = "https://graph.microsoft.com/.default offline_access";
+// Explicit Graph scopes — NOT .default. These map to the delegated permissions on the app registration.
+const GRAPH_SCOPE: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access";
 const DEVICE_AUTH_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
 
@@ -72,16 +75,23 @@ impl AuthManager {
             ("scope", GRAPH_SCOPE),
         ];
         
-        let resp = ureq::post(DEVICE_AUTH_URL)
-            .send_form(&params)
-            .map_err(|e| OmarchyError::HttpError(e.to_string()))?;
-        
-        if resp.status() < 200 || resp.status() >= 300 {
-            return Err(OmarchyError::InvalidDeviceFlow(
-                format!("Status {}: {}", resp.status(), resp.into_string().unwrap_or_default())
-            ));
-        }
-        
+        // ureq 2.x returns Err(ureq::Error::Status(code, response)) for non-2xx —
+        // we must handle that arm to read the error body, not just convert to string.
+        let resp = match ureq::post(DEVICE_AUTH_URL).send_form(&params) {
+            Ok(r) => r,
+            Err(ureq::Error::Status(code, r)) => {
+                let body = r.into_string().unwrap_or_default();
+                error!("Device code request failed with status {}: {}", code, body);
+                return Err(OmarchyError::InvalidDeviceFlow(
+                    format!("Status {}: {}", code, body)
+                ));
+            }
+            Err(e) => {
+                error!("Device code request transport error: {}", e);
+                return Err(OmarchyError::HttpError(e.to_string()));
+            }
+        };
+
         let device_response: DeviceFlowResponse = resp
             .into_json()
             .map_err(|e| OmarchyError::HttpError(e.to_string()))?;
