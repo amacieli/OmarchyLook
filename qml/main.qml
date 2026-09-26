@@ -53,6 +53,13 @@ Window {
 
     Component.onCompleted: {
         console.log("=== OmarchyLook QML Initialized ===")
+        // Deferred folder load — HTTP server needs ~1s to be ready
+        Qt.callLater(function() {
+            Qt.createQmlObject(
+                'import QtQuick 2.15; Timer { interval: 2500; running: true; repeat: false; onTriggered: { root.loadFolders() } }',
+                root, "folderTimer"
+            )
+        })
     }
 
     function loadAuthState() {
@@ -165,15 +172,17 @@ Window {
     property bool showAuthModal: false
 
     // Navigation state
-    // focus: "nav" = left bar active, "msg" = message pane active
+    // focus: "nav" = left bar active, "folder" = folder bar, "msg" = message pane
     property string focusPane: "nav"
     property int navIndex: 0   // which nav item the › is on (0=mail,1=cal,2=contacts,3=tasks,4=settings)
+    property bool navOnToggle: false  // whether › is on the collapse/expand toggle row
     property int msgIndex: 0   // which message row the › is on
     property bool sidebarExpanded: true  // expand/collapse sidebar
 
     // Nav items definition (main items + settings pinned at bottom)
+    // Mail uses the envelope icon (\uf0e0) as its prefix icon
     property var navItems: [
-        { icon: "\uf6ef", label: "Mail",      view: "mail"     },
+        { icon: "\uf0e0", label: "Mail",      view: "mail"     },
         { icon: "\uf073", label: "Calendar",  view: "calendar" },
         { icon: "\uf0c0", label: "People",    view: "contacts" },
         { icon: "\uf0ae", label: "Tasks",     view: "tasks"    },
@@ -227,15 +236,31 @@ Window {
             // ── Nav pane focused ──────────────────────────────────────
             if (root.focusPane === "nav") {
                 if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
-                    root.navIndex = Math.min(root.navIndex + 1, root.navItems.length - 1)
-                    root.currentView = root.navItems[root.navIndex].view
+                    if (root.navOnToggle) {
+                        // Toggle row → first nav item
+                        root.navOnToggle = false
+                        root.navIndex = 0
+                        root.currentView = root.navItems[0].view
+                    } else {
+                        root.navIndex = Math.min(root.navIndex + 1, root.navItems.length - 1)
+                        root.currentView = root.navItems[root.navIndex].view
+                    }
                     event.accepted = true
                 } else if (event.key === Qt.Key_K || event.key === Qt.Key_Up) {
-                    root.navIndex = Math.max(root.navIndex - 1, 0)
-                    root.currentView = root.navItems[root.navIndex].view
+                    if (root.navOnToggle) {
+                        // Already at top — stay
+                    } else if (root.navIndex === 0) {
+                        // First nav item → toggle row
+                        root.navOnToggle = true
+                    } else {
+                        root.navIndex = Math.max(root.navIndex - 1, 0)
+                        root.currentView = root.navItems[root.navIndex].view
+                    }
                     event.accepted = true
-                } else if (event.key === Qt.Key_L || event.key === Qt.Key_Return) {
-                    if (root.currentView === "mail") {
+                } else if (event.key === Qt.Key_L || event.key === Qt.Key_Return || event.key === Qt.Key_Space) {
+                    if (root.navOnToggle) {
+                        root.sidebarExpanded = !root.sidebarExpanded
+                    } else if (root.currentView === "mail") {
                         root.focusPane = "folder"
                         root.folderIndex = 0
                     } else {
@@ -244,13 +269,14 @@ Window {
                     }
                     event.accepted = true
                 } else if (event.key === Qt.Key_S) {
-                    // s cycles: nav → folder (mail) or msg (other views)
-                    if (root.currentView === "mail") {
-                        root.focusPane = "folder"
-                        root.folderIndex = 0
-                    } else {
-                        root.focusPane = "msg"
-                        root.msgIndex = 0
+                    if (!root.navOnToggle) {
+                        if (root.currentView === "mail") {
+                            root.focusPane = "folder"
+                            root.folderIndex = 0
+                        } else {
+                            root.focusPane = "msg"
+                            root.msgIndex = 0
+                        }
                     }
                     event.accepted = true
                 }
@@ -340,67 +366,53 @@ Window {
                         anchors.bottomMargin: 12
                         spacing: 0
 
-                        // ── Brand / collapse toggle ───────────────────
+                        // ── Collapse/expand toggle row ────────────────
                         Item {
                             Layout.fillWidth: true
                             Layout.preferredHeight: 36
+
+                            property bool hasFocus: root.focusPane === "nav" && root.navOnToggle
 
                             RowLayout {
                                 anchors.fill: parent
                                 anchors.leftMargin: 6
                                 spacing: 0
 
-                                // 1-char left margin for › alignment
+                                // › selector (1-char left margin, consistent with nav items)
                                 Text {
-                                    text: " "
+                                    text: parent.parent.hasFocus ? "›" : " "
                                     font.family: root.monoFont
                                     font.pixelSize: 13
+                                    color: root.accentColor
                                     Layout.preferredWidth: 12
                                 }
 
-                                // Envelope logo
+                                // Filled triangle: ▶ collapsed, ▼ expanded
                                 Text {
-                                    text: "\uf0e0"
-                                    font.family: root.monoFont
-                                    font.pixelSize: 15
-                                    color: root.accentColor
-                                    Layout.preferredWidth: 20
-                                }
-
-                                // App name — only when expanded
-                                Text {
-                                    visible: root.sidebarExpanded
-                                    opacity: root.sidebarExpanded ? 1 : 0
-                                    text: " omarchylook"
-                                    font.family: root.monoFont
-                                    font.pixelSize: 11
-                                    color: "#444444"
-                                    Layout.fillWidth: true
-                                    Behavior on opacity { NumberAnimation { duration: 100 } }
-                                }
-
-                                // Collapse/expand arrow
-                                Text {
-                                    text: root.sidebarExpanded ? "\uf053" : "\uf054"  // chevron left/right
+                                    text: root.sidebarExpanded ? "\u25bc" : "\u25b6"
                                     font.family: root.monoFont
                                     font.pixelSize: 10
-                                    color: "#333333"
-                                    rightPadding: 6
+                                    color: parent.parent.hasFocus ? root.accentColor : "#333333"
+                                    Layout.preferredWidth: 16
+                                }
 
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            root.sidebarExpanded = !root.sidebarExpanded
-                                            keyHandler.forceActiveFocus()
-                                        }
-                                    }
+                                Item { Layout.fillWidth: true }
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.sidebarExpanded = !root.sidebarExpanded
+                                    root.navOnToggle = true
+                                    root.focusPane = "nav"
+                                    keyHandler.forceActiveFocus()
                                 }
                             }
                         }
 
                         // Spacer
-                        Item { Layout.preferredHeight: 8 }
+                        Item { Layout.preferredHeight: 4 }
 
                         // ── Main nav items (Mail, Calendar, People, Tasks) ─
                         Repeater {
@@ -456,6 +468,7 @@ Window {
                                         root.navIndex = index
                                         root.currentView = root.navItems[index].view
                                         root.focusPane = "nav"
+                                        root.navOnToggle = false
                                         keyHandler.forceActiveFocus()
                                     }
                                 }
@@ -642,7 +655,25 @@ Window {
                         }
                     }
 
-                    // Load folders when bar becomes visible
+                    // Load folders: deferred 2s after init (server must be ready),
+                    // and whenever auth state flips to true
+                    Timer {
+                        id: folderInitTimer
+                        interval: 2000
+                        running: false
+                        repeat: false
+                        onTriggered: root.loadFolders()
+                    }
+
+                    Connections {
+                        target: root
+                        function onIsAuthenticatedChanged() {
+                            if (root.isAuthenticated && folderModel.count === 0) {
+                                root.loadFolders()
+                            }
+                        }
+                    }
+
                     onVisibleChanged: {
                         if (visible && folderModel.count === 0) {
                             root.loadFolders()
@@ -651,7 +682,7 @@ Window {
 
                     Component.onCompleted: {
                         if (root.currentView === "mail") {
-                            root.loadFolders()
+                            folderInitTimer.start()
                         }
                     }
                 }
