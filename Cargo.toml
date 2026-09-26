@@ -30,9 +30,8 @@ chrono = { version = "0.4", features = ["serde"] }
 notify = "6.1"
 
 # Qt bindings (cxx-qt) - Phase 2 integration
-# For now, omit from build as scaffolding phase focuses on backend
-# cxx-qt = { version = "0.10" }
-# cxx = "1.0"
+cxx-qt = { version = "0.10" }
+cxx = "1.0"
 
 # Logging
 log = "0.4"
@@ -45,8 +44,8 @@ urlencoding = "2.1"
 
 [build-dependencies]
 # Qt build integration - Phase 2
-# qt-build-utils = { version = "0.10" }
-# cxx-qt-build = { version = "0.10" }
+cxx-qt-build = { version = "0.10" }
+cxx-build = "1.0"
 
 [[bin]]
 name = "omarchy-look"

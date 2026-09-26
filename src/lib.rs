@@ -14,6 +14,7 @@ pub mod settings;
 pub mod keyring_mgr;
 pub mod models;
 pub mod errors;
+pub mod qt_bridge;
 
 pub use auth::AuthManager;
 pub use graph::GraphClient;
