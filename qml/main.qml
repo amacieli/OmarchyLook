@@ -606,9 +606,7 @@ Window {
                                                     font.family: root.monoFont
                                                     font.pixelSize: 11
                                                     font.bold: !model.is_read
-                                                    color: (root.focusPane === "msg" && root.msgIndex === index)
-                                                           ? root.accentColor
-                                                           : (model.is_read ? "#555555" : "#cccccc")
+                                                    color: model.is_read ? "#555555" : "#cccccc"
                                                     elide: Text.ElideRight
                                                     Layout.fillWidth: true
                                                 }
@@ -625,9 +623,7 @@ Window {
                                                 text: model.subject
                                                 font.family: root.monoFont
                                                 font.pixelSize: 11
-                                                color: (root.focusPane === "msg" && root.msgIndex === index)
-                                                       ? "#aaaaaa"
-                                                       : (model.is_read ? "#333333" : "#666666")
+                                                color: model.is_read ? "#333333" : "#666666"
                                                 elide: Text.ElideRight
                                                 Layout.fillWidth: true
                                             }
