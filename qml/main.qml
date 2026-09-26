@@ -167,14 +167,16 @@ Window {
     // Navigation state
     // focus: "nav" = left bar active, "msg" = message pane active
     property string focusPane: "nav"
-    property int navIndex: 0   // which nav item the › is on (0=mail,1=cal,2=contacts,3=settings)
+    property int navIndex: 0   // which nav item the › is on (0=mail,1=cal,2=contacts,3=tasks,4=settings)
     property int msgIndex: 0   // which message row the › is on
+    property bool sidebarExpanded: true  // expand/collapse sidebar
 
-    // Nav items definition
+    // Nav items definition (main items + settings pinned at bottom)
     property var navItems: [
         { icon: "\uf6ef", label: "Mail",      view: "mail"     },
         { icon: "\uf073", label: "Calendar",  view: "calendar" },
-        { icon: "\uf0c0", label: "Contacts",  view: "contacts" },
+        { icon: "\uf0c0", label: "People",    view: "contacts" },
+        { icon: "\uf0ae", label: "Tasks",     view: "tasks"    },
         { icon: "\uf013", label: "Settings",  view: "settings" }
     ]
 
@@ -202,8 +204,12 @@ Window {
                     root.navIndex = Math.max(root.navIndex - 1, 0)
                     root.currentView = root.navItems[root.navIndex].view
                     event.accepted = true
-                } else if (event.key === Qt.Key_L || event.key === Qt.Key_Return || event.key === Qt.Key_S) {
-                    // Move focus into message pane
+                } else if (event.key === Qt.Key_L || event.key === Qt.Key_Return) {
+                    root.focusPane = "msg"
+                    root.msgIndex = 0
+                    event.accepted = true
+                } else if (event.key === Qt.Key_S) {
+                    // s cycles: nav → msg → nav
                     root.focusPane = "msg"
                     root.msgIndex = 0
                     event.accepted = true
@@ -211,13 +217,16 @@ Window {
             // ── Message pane focused ──────────────────────────────────
             } else if (root.focusPane === "msg") {
                 if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
-                    root.msgIndex = root.msgIndex + 1  // ListView clamps via model count
+                    root.msgIndex = root.msgIndex + 1
                     event.accepted = true
                 } else if (event.key === Qt.Key_K || event.key === Qt.Key_Up) {
                     root.msgIndex = Math.max(root.msgIndex - 1, 0)
                     event.accepted = true
                 } else if (event.key === Qt.Key_H || event.key === Qt.Key_Escape) {
-                    // Back to nav pane
+                    root.focusPane = "nav"
+                    event.accepted = true
+                } else if (event.key === Qt.Key_S) {
+                    // s cycles: msg → nav
                     root.focusPane = "nav"
                     event.accepted = true
                 }
@@ -240,9 +249,13 @@ Window {
 
                 // ── Sidebar ───────────────────────────────────────────
                 Rectangle {
-                    Layout.preferredWidth: 52
+                    id: sidebar
+                    Layout.preferredWidth: root.sidebarExpanded ? 160 : 42
                     Layout.fillHeight: true
                     color: "#000000"
+                    clip: true
+
+                    Behavior on Layout.preferredWidth { NumberAnimation { duration: 150 } }
 
                     // Subtle right separator
                     Rectangle {
@@ -255,54 +268,116 @@ Window {
 
                     ColumnLayout {
                         anchors.fill: parent
-                        anchors.topMargin: 16
-                        anchors.bottomMargin: 16
-                        anchors.leftMargin: 0
+                        anchors.topMargin: 10
+                        anchors.bottomMargin: 12
                         spacing: 0
 
-                        // App brand mark at top
-                        Text {
+                        // ── Brand / collapse toggle ───────────────────
+                        Item {
                             Layout.fillWidth: true
-                            horizontalAlignment: Text.AlignHCenter
-                            text: "\uf0e0"  // envelope glyph as logo
-                            font.family: root.monoFont
-                            font.pixelSize: 16
-                            color: root.accentColor
-                            bottomPadding: 20
+                            Layout.preferredHeight: 36
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 6
+                                spacing: 0
+
+                                // 1-char left margin for › alignment
+                                Text {
+                                    text: " "
+                                    font.family: root.monoFont
+                                    font.pixelSize: 13
+                                    Layout.preferredWidth: 12
+                                }
+
+                                // Envelope logo
+                                Text {
+                                    text: "\uf0e0"
+                                    font.family: root.monoFont
+                                    font.pixelSize: 15
+                                    color: root.accentColor
+                                    Layout.preferredWidth: 20
+                                }
+
+                                // App name — only when expanded
+                                Text {
+                                    visible: root.sidebarExpanded
+                                    opacity: root.sidebarExpanded ? 1 : 0
+                                    text: " omarchylook"
+                                    font.family: root.monoFont
+                                    font.pixelSize: 11
+                                    color: "#444444"
+                                    Layout.fillWidth: true
+                                    Behavior on opacity { NumberAnimation { duration: 100 } }
+                                }
+
+                                // Collapse/expand arrow
+                                Text {
+                                    text: root.sidebarExpanded ? "\uf053" : "\uf054"  // chevron left/right
+                                    font.family: root.monoFont
+                                    font.pixelSize: 10
+                                    color: "#333333"
+                                    rightPadding: 6
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.sidebarExpanded = !root.sidebarExpanded
+                                            keyHandler.forceActiveFocus()
+                                        }
+                                    }
+                                }
+                            }
                         }
 
-                        // Nav items (mail, calendar, contacts) — main section
+                        // Spacer
+                        Item { Layout.preferredHeight: 8 }
+
+                        // ── Main nav items (Mail, Calendar, People, Tasks) ─
                         Repeater {
-                            model: 3  // first 3 nav items
+                            model: 4  // indices 0-3
                             delegate: Item {
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 40
+                                Layout.preferredHeight: 34
 
                                 property bool isActive: root.navIndex === index
                                 property bool hasFocus: root.focusPane === "nav" && isActive
 
                                 RowLayout {
                                     anchors.fill: parent
-                                    anchors.leftMargin: 4
+                                    anchors.leftMargin: 6
                                     spacing: 0
 
-                                    // › cursor
+                                    // › — always 1-char wide left margin
                                     Text {
                                         text: hasFocus ? "›" : " "
                                         font.family: root.monoFont
-                                        font.pixelSize: 14
+                                        font.pixelSize: 13
                                         color: root.accentColor
-                                        Layout.preferredWidth: 10
+                                        Layout.preferredWidth: 12
                                     }
 
                                     // Icon
                                     Text {
                                         text: root.navItems[index].icon
                                         font.family: root.monoFont
-                                        font.pixelSize: 16
-                                        color: isActive ? root.accentColor : "#555555"
-                                        horizontalAlignment: Text.AlignHCenter
+                                        font.pixelSize: 15
+                                        color: isActive ? root.accentColor : "#444444"
+                                        Layout.preferredWidth: 20
+                                    }
+
+                                    // Label — only when expanded
+                                    Text {
+                                        visible: root.sidebarExpanded
+                                        opacity: root.sidebarExpanded ? 1 : 0
+                                        text: " " + root.navItems[index].label
+                                        font.family: root.monoFont
+                                        font.pixelSize: 12
+                                        color: isActive ? root.accentColor : "#444444"
                                         Layout.fillWidth: true
+                                        elide: Text.ElideRight
+                                        Behavior on opacity { NumberAnimation { duration: 100 } }
                                     }
                                 }
 
@@ -321,34 +396,44 @@ Window {
 
                         Item { Layout.fillHeight: true }
 
-                        // Settings — pinned to bottom
+                        // ── Settings — pinned to bottom ────────────────
                         Item {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: 40
+                            Layout.preferredHeight: 34
 
-                            property bool isActive: root.navIndex === 3
+                            property bool isActive: root.navIndex === 4
                             property bool hasFocus: root.focusPane === "nav" && isActive
 
                             RowLayout {
                                 anchors.fill: parent
-                                anchors.leftMargin: 4
+                                anchors.leftMargin: 6
                                 spacing: 0
 
                                 Text {
                                     text: parent.parent.hasFocus ? "›" : " "
                                     font.family: root.monoFont
-                                    font.pixelSize: 14
+                                    font.pixelSize: 13
                                     color: root.accentColor
-                                    Layout.preferredWidth: 10
+                                    Layout.preferredWidth: 12
                                 }
 
                                 Text {
-                                    text: root.navItems[3].icon
+                                    text: root.navItems[4].icon
                                     font.family: root.monoFont
-                                    font.pixelSize: 16
-                                    color: parent.parent.isActive ? root.accentColor : "#555555"
-                                    horizontalAlignment: Text.AlignHCenter
+                                    font.pixelSize: 15
+                                    color: parent.parent.isActive ? root.accentColor : "#444444"
+                                    Layout.preferredWidth: 20
+                                }
+
+                                Text {
+                                    visible: root.sidebarExpanded
+                                    opacity: root.sidebarExpanded ? 1 : 0
+                                    text: " " + root.navItems[4].label
+                                    font.family: root.monoFont
+                                    font.pixelSize: 12
+                                    color: parent.parent.isActive ? root.accentColor : "#444444"
                                     Layout.fillWidth: true
+                                    Behavior on opacity { NumberAnimation { duration: 100 } }
                                 }
                             }
 
@@ -356,7 +441,7 @@ Window {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
-                                    root.navIndex = 3
+                                    root.navIndex = 4
                                     root.currentView = "settings"
                                     root.focusPane = "nav"
                                     keyHandler.forceActiveFocus()
