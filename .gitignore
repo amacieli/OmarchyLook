@@ -46,3 +46,18 @@ qml_cache/
 
 # Qt build
 .qt_for_python/
+
+# Rust
+/target/
+Cargo.lock
+*.o
+*.a
+*.so
+*.dylib
+
+# Logs
+*.log
+
+# Temporary
+*.tmp
+.hermes/

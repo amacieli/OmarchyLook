@@ -53,15 +53,6 @@ Rectangle {
                     color: "#7c6af7"
                     Layout.fillWidth: true
                 }
-
-                Text {
-                    text: "📧 [m]ail  📅 [c]alendar  👥 [p]hotos  ✓ [t]asks  |  [?] help  [q] quit"
-                    font.family: root.monoFont
-                    font.pixelSize: root.baseSize
-                    color: "#888888"
-                    Layout.fillWidth: true
-                    Layout.alignment: Qt.AlignRight
-                }
             }
         }
 
@@ -89,15 +80,6 @@ Rectangle {
                         color: "#1a1a1a"
                         border.color: "#7c6af7"
                         border.width: 1
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "NAVIGATION"
-                            font.family: root.monoFont
-                            font.pixelSize: root.baseSize
-                            font.bold: true
-                            color: "#7c6af7"
-                        }
                     }
 
                     // Mail nav item
@@ -114,7 +96,7 @@ Rectangle {
 
                         Text {
                             anchors.centerIn: parent
-                            text: "  [M] Mail"
+                            text: "[M] Mail"
                             font.family: root.monoFont
                             font.pixelSize: root.baseSize
                             color: "#7c6af7"
@@ -142,7 +124,7 @@ Rectangle {
 
                         Text {
                             anchors.centerIn: parent
-                            text: "  [C] Calendar"
+                            text: "[C] Calendar"
                             font.family: root.monoFont
                             font.pixelSize: root.baseSize
                             color: "#666666"
@@ -170,7 +152,7 @@ Rectangle {
 
                         Text {
                             anchors.centerIn: parent
-                            text: "  [P] Contacts"
+                            text: "[P] Contacts"
                             font.family: root.monoFont
                             font.pixelSize: root.baseSize
                             color: "#666666"
@@ -198,7 +180,7 @@ Rectangle {
 
                         Text {
                             anchors.centerIn: parent
-                            text: "  [T] Tasks"
+                            text: "[T] Tasks"
                             font.family: root.monoFont
                             font.pixelSize: root.baseSize
                             color: "#666666"
@@ -211,6 +193,35 @@ Rectangle {
                             onExited: parent.border.color = "#333333"
                         }
                     }
+
+                    // Settings nav menu
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 32
+                        Layout.leftMargin: 8
+                        Layout.rightMargin: 8
+                        Layout.topMargin: 4
+
+                        color: "#0d0d0d"
+                        border.color: "#333333"
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "[S] Settings"
+                            font.family: root.monoFont
+                            font.pixelSize: root.baseSize
+                            color: "#666666"
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onEntered: parent.border.color = "#9f8fff"
+                            onExited: parent.border.color = "#333333"
+                        }
+                    }
+
 
                     Item { Layout.fillHeight: true }
 
