@@ -231,18 +231,64 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
     for stream in listener.incoming() {
         match stream {
             Ok(mut stream) => {
-                let mut buf = [0u8; 512];
+                let mut buf = [0u8; 1024];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let request = String::from_utf8_lossy(&buf[..n]);
                 let first_line = request.lines().next().unwrap_or("");
 
-                let (status, action) = if first_line.contains("POST /auth/login") {
-                    ("200 OK", "login")
+                // ── GET /messages — return inbox list as JSON ──────────────
+                if first_line.contains("GET /messages") {
+                    let db_path = config_dir.join("messages.db");
+                    let body = match rusqlite::Connection::open(&db_path) {
+                        Ok(conn) => {
+                            let mut stmt = conn.prepare(
+                                "SELECT id, subject, from_email, from_name, received_at, is_read \
+                                 FROM messages ORDER BY received_at DESC LIMIT 50"
+                            ).unwrap();
+                            let rows: Vec<String> = stmt.query_map([], |row| {
+                                let id: String = row.get(0)?;
+                                let subject: String = row.get(1)?;
+                                let from_email: String = row.get(2)?;
+                                let from_name: String = row.get::<_, Option<String>>(3)?.unwrap_or_default();
+                                let received_at: String = row.get(4)?;
+                                let is_read: bool = row.get(5)?;
+                                Ok(format!(
+                                    "{{\"id\":{},\"subject\":{},\"from_email\":{},\"from_name\":{},\"received_at\":{},\"is_read\":{}}}",
+                                    serde_json::to_string(&id).unwrap(),
+                                    serde_json::to_string(&subject).unwrap(),
+                                    serde_json::to_string(&from_email).unwrap(),
+                                    serde_json::to_string(&from_name).unwrap(),
+                                    serde_json::to_string(&received_at).unwrap(),
+                                    is_read
+                                ))
+                            }).unwrap()
+                            .filter_map(|r| r.ok())
+                            .collect();
+                            format!("[{}]", rows.join(","))
+                        }
+                        Err(e) => {
+                            warn!("GET /messages: DB open failed: {}", e);
+                            "[]".to_string()
+                        }
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── POST trigger routes ────────────────────────────────────
+                let action = if first_line.contains("POST /auth/login") {
+                    "login"
                 } else if first_line.contains("POST /auth/logout") {
-                    ("200 OK", "logout")
+                    "logout"
                 } else {
-                    ("404 Not Found", "")
+                    ""
                 };
+
+                let status = if action.is_empty() { "404 Not Found" } else { "200 OK" };
 
                 // Always respond with CORS headers so QML XHR doesn't block
                 let response = format!(

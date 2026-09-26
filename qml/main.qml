@@ -155,207 +155,223 @@ Window {
         normalFontSize = Math.round(baseFontSize * scaleFactor)
     }
     
-    color: bgColor
-    
+    color: "#000000"
+
     // Authentication state - checked only when user navigates to Settings
     property bool isAuthenticated: false
-    
+
     // Current view state
-    property string currentView: "mail"  // "mail" or "settings"
-    property bool showAuthModal: false  // Show authentication modal when true
-    property bool sidebarCollapsed: false  // Sidebar collapse/expand state
-    
-    // Main content area - always show AppShell (auth happens in Settings page only)
+    property string currentView: "mail"
+    property bool showAuthModal: false
+
+    // Navigation state
+    // focus: "nav" = left bar active, "msg" = message pane active
+    property string focusPane: "nav"
+    property int navIndex: 0   // which nav item the › is on (0=mail,1=cal,2=contacts,3=settings)
+    property int msgIndex: 0   // which message row the › is on
+
+    // Nav items definition
+    property var navItems: [
+        { icon: "\uf6ef", label: "Mail",      view: "mail"     },
+        { icon: "\uf073", label: "Calendar",  view: "calendar" },
+        { icon: "\uf0c0", label: "Contacts",  view: "contacts" },
+        { icon: "\uf013", label: "Settings",  view: "settings" }
+    ]
+
+    // Main content area
     Loader {
         id: mainLoader
         anchors.fill: parent
         sourceComponent: appShellComponent
     }
-    
+
+    // ===== Global keyboard handler =====
+    Item {
+        id: keyHandler
+        anchors.fill: parent
+        focus: true
+
+        Keys.onPressed: function(event) {
+            // ── Nav pane focused ──────────────────────────────────────
+            if (root.focusPane === "nav") {
+                if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
+                    root.navIndex = Math.min(root.navIndex + 1, root.navItems.length - 1)
+                    root.currentView = root.navItems[root.navIndex].view
+                    event.accepted = true
+                } else if (event.key === Qt.Key_K || event.key === Qt.Key_Up) {
+                    root.navIndex = Math.max(root.navIndex - 1, 0)
+                    root.currentView = root.navItems[root.navIndex].view
+                    event.accepted = true
+                } else if (event.key === Qt.Key_L || event.key === Qt.Key_Return || event.key === Qt.Key_S) {
+                    // Move focus into message pane
+                    root.focusPane = "msg"
+                    root.msgIndex = 0
+                    event.accepted = true
+                }
+            // ── Message pane focused ──────────────────────────────────
+            } else if (root.focusPane === "msg") {
+                if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
+                    root.msgIndex = root.msgIndex + 1  // ListView clamps via model count
+                    event.accepted = true
+                } else if (event.key === Qt.Key_K || event.key === Qt.Key_Up) {
+                    root.msgIndex = Math.max(root.msgIndex - 1, 0)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_H || event.key === Qt.Key_Escape) {
+                    // Back to nav pane
+                    root.focusPane = "nav"
+                    event.accepted = true
+                }
+            }
+        }
+    }
+
     // ===== App Shell Component =====
     Component {
         id: appShellComponent
-        
+
         Rectangle {
-            color: root.color
-            
+            color: "#000000"
+            // Forward key events to global handler
+            Component.onCompleted: keyHandler.forceActiveFocus()
+
             RowLayout {
                 anchors.fill: parent
                 spacing: 0
-                
-                // Sidebar with collapse/expand
+
+                // ── Sidebar ───────────────────────────────────────────
                 Rectangle {
-                    Layout.preferredWidth: root.sidebarCollapsed ? 50 : 200
+                    Layout.preferredWidth: 52
                     Layout.fillHeight: true
-                    color: "#1a1a1a"
-                    border.width: 1
-                    border.color: "#000000"  // Left and top
-                    clip: true
-                    
-                    Behavior on Layout.preferredWidth {
-                        NumberAnimation { duration: 200 }
-                    }
-                    
+                    color: "#000000"
+
+                    // Subtle right separator
                     Rectangle {
                         anchors.right: parent.right
                         anchors.top: parent.top
                         anchors.bottom: parent.bottom
                         width: 1
-                        color: "#7c6af7"  // Right border
+                        color: "#1a1a1a"
                     }
-                    
+
                     ColumnLayout {
                         anchors.fill: parent
-                        anchors.margins: root.sidebarCollapsed ? 4 : 12
-                        spacing: root.sidebarCollapsed ? 8 : 12
-                        
-                        // Collapse/expand button at top
-                        Rectangle {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 40
-                            color: "#0d0d0d"
-                            border.color: "#7c6af7"
-                            border.width: 1
-                            
-                            Text {
-                                anchors.centerIn: parent
-                                text: root.sidebarCollapsed ? "▶" : "◀"
-                                font.family: root.monoFont
-                                font.pixelSize: 14
-                                color: root.accentColor
-                            }
-                            
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                onEntered: parent.border.color = "#9f8fff"
-                                onExited: parent.border.color = "#7c6af7"
-                                onClicked: root.sidebarCollapsed = !root.sidebarCollapsed
-                            }
-                        }
-                        
+                        anchors.topMargin: 16
+                        anchors.bottomMargin: 16
+                        anchors.leftMargin: 0
+                        spacing: 0
+
+                        // App brand mark at top
                         Text {
-                            visible: !root.sidebarCollapsed
-                            text: "╔═ MENU ═╗"
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            text: "\uf0e0"  // envelope glyph as logo
                             font.family: root.monoFont
-                            font.pixelSize: 11
+                            font.pixelSize: 16
                             color: root.accentColor
+                            bottomPadding: 20
                         }
-                        
-                        // Mail button
-                        Rectangle {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 40
-                            color: root.currentView === "mail" ? root.accentColor : root.color
-                            border.color: root.currentView === "mail" ? root.accentColor : "#7c6af7"
-                            border.width: 1
-                            
-                            Text {
-                                anchors.centerIn: parent
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.leftMargin: 4
-                                anchors.rightMargin: 4
-                                text: root.sidebarCollapsed ? "📧" : "  📧 Mail  "
-                                font.family: root.monoFont
-                                font.pixelSize: root.sidebarCollapsed ? 16 : 11
-                                color: root.currentView === "mail" ? "#0d0d0d" : root.accentColor
-                                horizontalAlignment: Text.AlignHCenter
-                            }
-                            
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                onEntered: parent.border.color = "#9f8fff"
-                                onExited: parent.border.color = root.currentView === "mail" ? root.accentColor : "#7c6af7"
-                                onClicked: root.currentView = "mail"
-                            }
-                        }
-                        
-                        // Calendar button
-                        Rectangle {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 40
-                            color: "#0d0d0d"
-                            border.color: "#666666"
-                            border.width: 1
-                            
-                            Text {
-                                anchors.centerIn: parent
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.leftMargin: 4
-                                anchors.rightMargin: 4
-                                text: root.sidebarCollapsed ? "📅" : "  📅 Calendar  "
-                                font.family: root.monoFont
-                                font.pixelSize: root.sidebarCollapsed ? 16 : 11
-                                color: "#888888"
-                                horizontalAlignment: Text.AlignHCenter
+
+                        // Nav items (mail, calendar, contacts) — main section
+                        Repeater {
+                            model: 3  // first 3 nav items
+                            delegate: Item {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 40
+
+                                property bool isActive: root.navIndex === index
+                                property bool hasFocus: root.focusPane === "nav" && isActive
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 4
+                                    spacing: 0
+
+                                    // › cursor
+                                    Text {
+                                        text: hasFocus ? "›" : " "
+                                        font.family: root.monoFont
+                                        font.pixelSize: 14
+                                        color: root.accentColor
+                                        Layout.preferredWidth: 10
+                                    }
+
+                                    // Icon
+                                    Text {
+                                        text: root.navItems[index].icon
+                                        font.family: root.monoFont
+                                        font.pixelSize: 16
+                                        color: isActive ? root.accentColor : "#555555"
+                                        horizontalAlignment: Text.AlignHCenter
+                                        Layout.fillWidth: true
+                                    }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.navIndex = index
+                                        root.currentView = root.navItems[index].view
+                                        root.focusPane = "nav"
+                                        keyHandler.forceActiveFocus()
+                                    }
+                                }
                             }
                         }
-                        
-                        // Contacts button
-                        Rectangle {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 40
-                            color: "#0d0d0d"
-                            border.color: "#666666"
-                            border.width: 1
-                            
-                            Text {
-                                anchors.centerIn: parent
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.leftMargin: 4
-                                anchors.rightMargin: 4
-                                text: root.sidebarCollapsed ? "👥" : "  👥 Contacts  "
-                                font.family: root.monoFont
-                                font.pixelSize: root.sidebarCollapsed ? 16 : 11
-                                color: "#888888"
-                                horizontalAlignment: Text.AlignHCenter
-                            }
-                        }
-                        
+
                         Item { Layout.fillHeight: true }
-                        
-                        // Settings button pinned to bottom (window-aware)
-                        Rectangle {
+
+                        // Settings — pinned to bottom
+                        Item {
                             Layout.fillWidth: true
                             Layout.preferredHeight: 40
-                            color: root.currentView === "settings" ? root.accentColor : "#0d0d0d"
-                            border.color: root.currentView === "settings" ? root.accentColor : "#666666"
-                            border.width: 1
-                            
-                            Text {
-                                anchors.centerIn: parent
-                                anchors.left: parent.left
-                                anchors.right: parent.right
+
+                            property bool isActive: root.navIndex === 3
+                            property bool hasFocus: root.focusPane === "nav" && isActive
+
+                            RowLayout {
+                                anchors.fill: parent
                                 anchors.leftMargin: 4
-                                anchors.rightMargin: 4
-                                text: root.sidebarCollapsed ? "⚙️" : "  ⚙️ Settings  "
-                                font.family: root.monoFont
-                                font.pixelSize: root.sidebarCollapsed ? 16 : 11
-                                color: root.currentView === "settings" ? "#0d0d0d" : "#888888"
-                                horizontalAlignment: Text.AlignHCenter
+                                spacing: 0
+
+                                Text {
+                                    text: parent.parent.hasFocus ? "›" : " "
+                                    font.family: root.monoFont
+                                    font.pixelSize: 14
+                                    color: root.accentColor
+                                    Layout.preferredWidth: 10
+                                }
+
+                                Text {
+                                    text: root.navItems[3].icon
+                                    font.family: root.monoFont
+                                    font.pixelSize: 16
+                                    color: parent.parent.isActive ? root.accentColor : "#555555"
+                                    horizontalAlignment: Text.AlignHCenter
+                                    Layout.fillWidth: true
+                                }
                             }
-                            
+
                             MouseArea {
                                 anchors.fill: parent
-                                hoverEnabled: true
-                                onEntered: parent.border.color = "#9f8fff"
-                                onExited: parent.border.color = root.currentView === "settings" ? root.accentColor : "#666666"
-                                onClicked: root.currentView = "settings"
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.navIndex = 3
+                                    root.currentView = "settings"
+                                    root.focusPane = "nav"
+                                    keyHandler.forceActiveFocus()
+                                }
                             }
                         }
                     }
                 }
-                
-                // Main content area
+
+                // ── Main content area ─────────────────────────────────
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    color: root.color
-                    
+                    color: "#000000"
+
                     Loader {
                         id: contentLoader
                         anchors.fill: parent
@@ -371,31 +387,213 @@ Window {
                 // Mail view component
                 Component {
                     id: mailViewComponent
-                    
+
                     ColumnLayout {
                         anchors.fill: parent
                         anchors.margins: 12
-                        spacing: 8
-                        
-                        // Header
-                        Text {
-                            text: "╔═ Mail Module (Phase 3) ═╗"
-                            font.family: root.monoFont
-                            font.pixelSize: 12
-                            color: root.accentColor
-                            font.bold: true
+                        spacing: 6
+
+                        // Header row
+                        RowLayout {
+                            Layout.fillWidth: true
+
+                            Text {
+                                text: "  Inbox"
+                                font.family: root.monoFont
+                                font.pixelSize: 12
+                                color: root.focusPane === "msg" ? root.accentColor : "#555555"
+                                font.bold: true
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            Text {
+                                id: inboxStatusText
+                                text: "Loading..."
+                                font.family: root.monoFont
+                                font.pixelSize: 10
+                                color: "#333333"
+                            }
+
+                            Text {
+                                text: "↻"
+                                font.family: root.monoFont
+                                font.pixelSize: 13
+                                color: "#444444"
+                                rightPadding: 8
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        keyHandler.forceActiveFocus()
+                                        inboxLoader.loadMessages()
+                                    }
+                                }
+                            }
                         }
-                        
-                        // Placeholder
-                        Text {
+
+                        // Inbox list
+                        Rectangle {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            text: "Mail list will load here\n\n(Phase 3 integration in progress)"
-                            font.family: root.monoFont
-                            font.pixelSize: 11
-                            color: root.textColor
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
+                            color: "#000000"
+                            border.color: "#111111"
+                            border.width: 1
+                            radius: 0
+
+                            ListView {
+                                id: inboxList
+                                anchors.fill: parent
+                                anchors.margins: 1
+                                clip: true
+                                spacing: 0
+                                currentIndex: root.focusPane === "msg" ? root.msgIndex : -1
+                                // Clamp msgIndex to valid range
+                                onCountChanged: {
+                                    if (root.msgIndex >= count && count > 0)
+                                        root.msgIndex = count - 1
+                                }
+
+                                model: ListModel { id: inboxModel }
+
+                                // Empty state
+                                Text {
+                                    anchors.centerIn: parent
+                                    visible: inboxModel.count === 0
+                                    text: inboxStatusText.text === "Loading..." ? "Loading messages..." : "No messages"
+                                    font.family: root.monoFont
+                                    font.pixelSize: 11
+                                    color: "#333"
+                                }
+
+                                delegate: Rectangle {
+                                    width: inboxList.width
+                                    height: 46
+                                    color: "#000000"
+
+                                    Rectangle {
+                                        width: parent.width
+                                        height: 1
+                                        color: "#111111"
+                                        anchors.bottom: parent.bottom
+                                    }
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        spacing: 0
+
+                                        // › cursor (visible when msg pane focused and this row selected)
+                                        Text {
+                                            text: (root.focusPane === "msg" && root.msgIndex === index) ? "›" : " "
+                                            font.family: root.monoFont
+                                            font.pixelSize: 14
+                                            color: root.accentColor
+                                            Layout.preferredWidth: 14
+                                            leftPadding: 4
+                                        }
+
+                                        // Unread dot
+                                        Rectangle {
+                                            width: 5
+                                            height: 5
+                                            radius: 3
+                                            color: model.is_read ? "transparent" : root.accentColor
+                                            Layout.preferredWidth: 10
+                                            Layout.alignment: Qt.AlignVCenter
+                                        }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            spacing: 1
+                                            Layout.topMargin: 6
+                                            Layout.bottomMargin: 6
+                                            Layout.leftMargin: 4
+                                            Layout.rightMargin: 10
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 0
+
+                                                Text {
+                                                    text: model.from_name !== "" ? model.from_name : model.from_email
+                                                    font.family: root.monoFont
+                                                    font.pixelSize: 11
+                                                    font.bold: !model.is_read
+                                                    color: (root.focusPane === "msg" && root.msgIndex === index)
+                                                           ? root.accentColor
+                                                           : (model.is_read ? "#555555" : "#cccccc")
+                                                    elide: Text.ElideRight
+                                                    Layout.fillWidth: true
+                                                }
+
+                                                Text {
+                                                    text: model.received_at.substring(0, 10)
+                                                    font.family: root.monoFont
+                                                    font.pixelSize: 10
+                                                    color: "#333333"
+                                                }
+                                            }
+
+                                            Text {
+                                                text: model.subject
+                                                font.family: root.monoFont
+                                                font.pixelSize: 11
+                                                color: (root.focusPane === "msg" && root.msgIndex === index)
+                                                       ? "#aaaaaa"
+                                                       : (model.is_read ? "#333333" : "#666666")
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.focusPane = "msg"
+                                            root.msgIndex = index
+                                            keyHandler.forceActiveFocus()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Async loader: fires on component ready, populates inboxModel
+                        Item {
+                            id: inboxLoader
+
+                            function loadMessages() {
+                                inboxStatusText.text = "Loading..."
+                                var xhr = new XMLHttpRequest()
+                                xhr.onreadystatechange = function() {
+                                    if (xhr.readyState !== XMLHttpRequest.DONE) return
+                                    if (xhr.status === 200) {
+                                        try {
+                                            var messages = JSON.parse(xhr.responseText)
+                                            inboxModel.clear()
+                                            for (var i = 0; i < messages.length; i++) {
+                                                inboxModel.append(messages[i])
+                                            }
+                                            inboxStatusText.text = messages.length + " messages"
+                                            console.log("[Inbox] Loaded", messages.length, "messages")
+                                        } catch(e) {
+                                            inboxStatusText.text = "Parse error"
+                                            console.log("[Inbox] Parse error:", e)
+                                        }
+                                    } else {
+                                        inboxStatusText.text = "Error " + xhr.status
+                                        console.log("[Inbox] HTTP error:", xhr.status)
+                                    }
+                                }
+                                xhr.open("GET", "http://127.0.0.1:27182/messages")
+                                xhr.send()
+                            }
+
+                            Component.onCompleted: loadMessages()
                         }
                     }
                 }
