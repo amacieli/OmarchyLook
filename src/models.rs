@@ -33,6 +33,18 @@ pub struct CachedToken {
     pub refresh_token: Option<String>,
 }
 
+/// Mail folder from Graph API / SQLite cache
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MailFolder {
+    pub id: String,
+    pub display_name: String,
+    pub parent_folder_id: Option<String>,
+    pub unread_item_count: Option<i32>,
+    pub total_item_count: Option<i32>,
+    #[serde(rename = "wellKnownName", default)]
+    pub well_known_name: Option<String>,
+}
+
 /// Mail message from Graph API
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Message {
@@ -72,6 +84,7 @@ pub struct EmailMessage {
     pub subject: String,
     pub received: String,
     pub body: String,
+    pub folder_id: Option<String>,
 }
 
 /// Cached mail entry in SQLite

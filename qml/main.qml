@@ -180,6 +180,36 @@ Window {
         { icon: "\uf013", label: "Settings",  view: "settings" }
     ]
 
+    // Folder pane state
+    property int folderIndex: 0       // which folder row › is on
+    property string selectedFolderId: ""  // folder_id passed to /messages
+
+    // Folder data — populated by async XHR on load + folder pane activation
+    ListModel { id: folderModel }
+
+    function loadFolders() {
+        var xhr = new XMLHttpRequest()
+        xhr.open("GET", "http://127.0.0.1:27182/folders", true)
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200) {
+                try {
+                    var folders = JSON.parse(xhr.responseText)
+                    folderModel.clear()
+                    for (var i = 0; i < folders.length; i++) {
+                        folderModel.append(folders[i])
+                    }
+                    // Default to first folder (Inbox) if none selected
+                    if (selectedFolderId === "" && folderModel.count > 0) {
+                        selectedFolderId = folderModel.get(0).id
+                    }
+                } catch(e) {
+                    console.log("[Folders] Parse error:", e)
+                }
+            }
+        }
+        xhr.send()
+    }
+
     // Main content area
     Loader {
         id: mainLoader
@@ -205,11 +235,49 @@ Window {
                     root.currentView = root.navItems[root.navIndex].view
                     event.accepted = true
                 } else if (event.key === Qt.Key_L || event.key === Qt.Key_Return) {
+                    if (root.currentView === "mail") {
+                        root.focusPane = "folder"
+                        root.folderIndex = 0
+                    } else {
+                        root.focusPane = "msg"
+                        root.msgIndex = 0
+                    }
+                    event.accepted = true
+                } else if (event.key === Qt.Key_S) {
+                    // s cycles: nav → folder (mail) or msg (other views)
+                    if (root.currentView === "mail") {
+                        root.focusPane = "folder"
+                        root.folderIndex = 0
+                    } else {
+                        root.focusPane = "msg"
+                        root.msgIndex = 0
+                    }
+                    event.accepted = true
+                }
+            // ── Folder pane focused ───────────────────────────────────
+            } else if (root.focusPane === "folder") {
+                if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
+                    root.folderIndex = Math.min(root.folderIndex + 1, folderModel.count - 1)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_K || event.key === Qt.Key_Up) {
+                    root.folderIndex = Math.max(root.folderIndex - 1, 0)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_L || event.key === Qt.Key_Return) {
+                    // Select folder and move to messages
+                    if (folderModel.count > 0) {
+                        root.selectedFolderId = folderModel.get(root.folderIndex).id
+                    }
                     root.focusPane = "msg"
                     root.msgIndex = 0
                     event.accepted = true
+                } else if (event.key === Qt.Key_H || event.key === Qt.Key_Escape) {
+                    root.focusPane = "nav"
+                    event.accepted = true
                 } else if (event.key === Qt.Key_S) {
-                    // s cycles: nav → msg → nav
+                    // s cycles: folder → msg
+                    if (folderModel.count > 0) {
+                        root.selectedFolderId = folderModel.get(root.folderIndex).id
+                    }
                     root.focusPane = "msg"
                     root.msgIndex = 0
                     event.accepted = true
@@ -223,7 +291,7 @@ Window {
                     root.msgIndex = Math.max(root.msgIndex - 1, 0)
                     event.accepted = true
                 } else if (event.key === Qt.Key_H || event.key === Qt.Key_Escape) {
-                    root.focusPane = "nav"
+                    root.focusPane = "folder"
                     event.accepted = true
                 } else if (event.key === Qt.Key_S) {
                     // s cycles: msg → nav
@@ -451,6 +519,143 @@ Window {
                     }
                 }
 
+                // ── Folder bar (mail view only) ───────────────────────
+                Rectangle {
+                    id: folderBar
+                    visible: root.currentView === "mail"
+                    Layout.preferredWidth: root.currentView === "mail" ? 140 : 0
+                    Layout.fillHeight: true
+                    color: "#000000"
+                    clip: true
+
+                    Behavior on Layout.preferredWidth { NumberAnimation { duration: 120 } }
+
+                    // Right separator
+                    Rectangle {
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: 1
+                        color: "#1a1a1a"
+                    }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.topMargin: 10
+                        anchors.bottomMargin: 8
+                        spacing: 0
+
+                        // Header
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 28
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 14
+                                spacing: 0
+                                Text {
+                                    text: "Folders"
+                                    font.family: root.monoFont
+                                    font.pixelSize: 10
+                                    color: "#333333"
+                                    Layout.fillWidth: true
+                                }
+                                // Refresh icon
+                                Text {
+                                    text: "\uf021"  // refresh
+                                    font.family: root.monoFont
+                                    font.pixelSize: 10
+                                    color: "#333333"
+                                    rightPadding: 8
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.loadFolders()
+                                    }
+                                }
+                            }
+                        }
+
+                        // Folder list
+                        ListView {
+                            id: folderListView
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            model: folderModel
+                            clip: true
+                            interactive: false  // keyboard-driven; mouse via delegate
+
+                            delegate: Item {
+                                width: folderListView.width
+                                height: 28
+
+                                property bool isFocused: root.focusPane === "folder" && root.folderIndex === index
+                                property bool isSelected: model.id === root.selectedFolderId
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 4
+                                    spacing: 0
+
+                                    // › cursor (1-char wide)
+                                    Text {
+                                        text: isFocused ? "›" : " "
+                                        font.family: root.monoFont
+                                        font.pixelSize: 12
+                                        color: root.accentColor
+                                        Layout.preferredWidth: 12
+                                    }
+
+                                    // Folder name
+                                    Text {
+                                        text: model.display_name
+                                        font.family: root.monoFont
+                                        font.pixelSize: 11
+                                        color: isSelected ? root.accentColor : "#555555"
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+
+                                    // Unread count badge (if > 0)
+                                    Text {
+                                        visible: model.unread_item_count > 0
+                                        text: model.unread_item_count > 99 ? "99+" : model.unread_item_count.toString()
+                                        font.family: root.monoFont
+                                        font.pixelSize: 9
+                                        color: "#444444"
+                                        rightPadding: 6
+                                    }
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.folderIndex = index
+                                        root.selectedFolderId = model.id
+                                        root.focusPane = "msg"
+                                        root.msgIndex = 0
+                                        keyHandler.forceActiveFocus()
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Load folders when bar becomes visible
+                    onVisibleChanged: {
+                        if (visible && folderModel.count === 0) {
+                            root.loadFolders()
+                        }
+                    }
+
+                    Component.onCompleted: {
+                        if (root.currentView === "mail") {
+                            root.loadFolders()
+                        }
+                    }
+                }
+
                 // ── Main content area ─────────────────────────────────
                 Rectangle {
                     Layout.fillWidth: true
@@ -670,11 +875,21 @@ Window {
                                         console.log("[Inbox] HTTP error:", xhr.status)
                                     }
                                 }
-                                xhr.open("GET", "http://127.0.0.1:27182/messages")
+                                var url = "http://127.0.0.1:27182/messages"
+                                if (root.selectedFolderId !== "") {
+                                    url += "?folder_id=" + encodeURIComponent(root.selectedFolderId)
+                                }
+                                xhr.open("GET", url)
                                 xhr.send()
                             }
 
                             Component.onCompleted: loadMessages()
+
+                            // Reload when selected folder changes
+                            Connections {
+                                target: root
+                                function onSelectedFolderIdChanged() { loadMessages() }
+                            }
                         }
                     }
                 }

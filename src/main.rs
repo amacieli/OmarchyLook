@@ -236,16 +236,75 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                 let request = String::from_utf8_lossy(&buf[..n]);
                 let first_line = request.lines().next().unwrap_or("");
 
-                // ── GET /messages — return inbox list as JSON ──────────────
-                if first_line.contains("GET /messages") {
+                // ── GET /folders — return cached folder list as JSON ──────────────
+                if first_line.contains("GET /folders") {
                     let db_path = config_dir.join("messages.db");
                     let body = match rusqlite::Connection::open(&db_path) {
                         Ok(conn) => {
                             let mut stmt = conn.prepare(
-                                "SELECT id, subject, from_email, from_name, received_at, is_read \
-                                 FROM messages ORDER BY received_at DESC LIMIT 50"
+                                "SELECT id, display_name, unread_item_count, well_known_name \
+                                 FROM folders ORDER BY sort_order ASC, display_name ASC"
                             ).unwrap();
                             let rows: Vec<String> = stmt.query_map([], |row| {
+                                let id: String = row.get(0)?;
+                                let display_name: String = row.get(1)?;
+                                let unread: i32 = row.get::<_, Option<i32>>(2)?.unwrap_or(0);
+                                let well_known: String = row.get::<_, Option<String>>(3)?.unwrap_or_default();
+                                Ok(format!(
+                                    "{{\"id\":{},\"display_name\":{},\"unread_item_count\":{},\"well_known_name\":{}}}",
+                                    serde_json::to_string(&id).unwrap(),
+                                    serde_json::to_string(&display_name).unwrap(),
+                                    unread,
+                                    serde_json::to_string(&well_known).unwrap(),
+                                ))
+                            }).unwrap()
+                            .filter_map(|r| r.ok())
+                            .collect();
+                            format!("[{}]", rows.join(","))
+                        }
+                        Err(e) => {
+                            warn!("GET /folders: DB open failed: {}", e);
+                            "[]".to_string()
+                        }
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── GET /messages — return messages as JSON (optional ?folder_id=) ──────────────
+                if first_line.contains("GET /messages") {
+                    // Parse optional ?folder_id= query parameter
+                    let folder_id: Option<String> = first_line
+                        .split_once("folder_id=")
+                        .map(|(_, rest)| {
+                            rest.split(|c| c == ' ' || c == '&' || c == '\r' || c == '\n')
+                                .next()
+                                .unwrap_or("")
+                                .to_string()
+                        })
+                        .filter(|s| !s.is_empty());
+
+                    let db_path = config_dir.join("messages.db");
+                    let body = match rusqlite::Connection::open(&db_path) {
+                        Ok(conn) => {
+                            let (sql, has_folder) = match &folder_id {
+                                Some(_) => (
+                                    "SELECT id, subject, from_email, from_name, received_at, is_read \
+                                     FROM messages WHERE folder_id = ?1 ORDER BY received_at DESC LIMIT 50",
+                                    true,
+                                ),
+                                None => (
+                                    "SELECT id, subject, from_email, from_name, received_at, is_read \
+                                     FROM messages ORDER BY received_at DESC LIMIT 50",
+                                    false,
+                                ),
+                            };
+                            let mut stmt = conn.prepare(sql).unwrap();
+                            let map_row = |row: &rusqlite::Row| {
                                 let id: String = row.get(0)?;
                                 let subject: String = row.get(1)?;
                                 let from_email: String = row.get(2)?;
@@ -261,9 +320,18 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                                     serde_json::to_string(&received_at).unwrap(),
                                     is_read
                                 ))
-                            }).unwrap()
-                            .filter_map(|r| r.ok())
-                            .collect();
+                            };
+                            let rows: Vec<String> = if has_folder {
+                                stmt.query_map([folder_id.as_deref().unwrap_or("")], map_row)
+                                    .unwrap()
+                                    .filter_map(|r| r.ok())
+                                    .collect()
+                            } else {
+                                stmt.query_map([], map_row)
+                                    .unwrap()
+                                    .filter_map(|r| r.ok())
+                                    .collect()
+                            };
                             format!("[{}]", rows.join(","))
                         }
                         Err(e) => {
@@ -373,7 +441,8 @@ fn start_email_daemon_thread(config_dir: &PathBuf) {
         
         // Create the daemon with config
         let daemon_config = DaemonConfig {
-            poll_interval_secs: 120, // 2 minutes, configurable via settings later
+            poll_interval_secs: 120,
+            folder_sync_interval_secs: 600,
             max_retries: 10,
         };
         let daemon = EmailDaemon::new(daemon_config, daemon_db, provider);

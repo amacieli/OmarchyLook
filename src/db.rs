@@ -1,7 +1,7 @@
 //! SQLite database with FTS5 for local mail cache
 
 use crate::errors::{OmarchyError, Result};
-use crate::models::{CachedMessage, Message, EmailMessage};
+use crate::models::{CachedMessage, EmailMessage, MailFolder, Message};
 use log::{debug, info};
 use rusqlite::{Connection, params, OptionalExtension};
 use chrono::Utc;
@@ -79,11 +79,41 @@ impl Database {
         self.conn.execute(
             "CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
                 INSERT INTO messages_fts(messages_fts, id, subject, from_email, from_name, body)
-                VALUES('delete', old.id, old.subject, old.from_email, old.from_name, old.body);
+                VALUES ('delete', old.id, old.subject, old.from_email, old.from_name, old.body);
             END",
             [],
         )?;
-        
+
+        // Folders table
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS folders (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                parent_folder_id TEXT,
+                unread_item_count INTEGER DEFAULT 0,
+                total_item_count INTEGER DEFAULT 0,
+                well_known_name TEXT,
+                sort_order INTEGER DEFAULT 999,
+                cached_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+
+        // folder_id column on messages (added via ALTER TABLE for existing DBs)
+        let has_folder_col: bool = self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='folder_id'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .unwrap_or(0) > 0;
+        if !has_folder_col {
+            self.conn.execute(
+                "ALTER TABLE messages ADD COLUMN folder_id TEXT",
+                [],
+            )?;
+        }
+
         Ok(())
     }
     
@@ -269,5 +299,92 @@ impl Database {
         )?;
 
         Ok(())
+    }
+
+    /// Upsert a folder from Graph API
+    pub fn upsert_folder(&self, folder: &MailFolder) -> Result<()> {
+        // Assign sort_order: well-known folders get fixed low numbers, others 999
+        let sort_order: i32 = match folder.well_known_name.as_deref() {
+            Some("inbox")        => 1,
+            Some("drafts")       => 2,
+            Some("sentitems")    => 3,
+            Some("deleteditems") => 4,
+            Some("junkemail")    => 5,
+            Some("archive")      => 6,
+            _                    => 999,
+        };
+
+        self.conn.execute(
+            "INSERT INTO folders (id, display_name, parent_folder_id, unread_item_count, total_item_count, well_known_name, sort_order, cached_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET
+               display_name      = excluded.display_name,
+               unread_item_count = excluded.unread_item_count,
+               total_item_count  = excluded.total_item_count,
+               sort_order        = excluded.sort_order,
+               cached_at         = CURRENT_TIMESTAMP",
+            params![
+                folder.id,
+                folder.display_name,
+                folder.parent_folder_id,
+                folder.unread_item_count,
+                folder.total_item_count,
+                folder.well_known_name,
+                sort_order,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get all folders sorted: well-known first (by sort_order), then alphabetical
+    pub fn get_folders(&self) -> Result<Vec<MailFolder>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, display_name, parent_folder_id, unread_item_count, total_item_count, well_known_name
+             FROM folders
+             ORDER BY sort_order ASC, display_name ASC",
+        )?;
+
+        let folders = stmt
+            .query_map([], |row| {
+                Ok(MailFolder {
+                    id:                row.get(0)?,
+                    display_name:      row.get(1)?,
+                    parent_folder_id:  row.get(2)?,
+                    unread_item_count: row.get(3)?,
+                    total_item_count:  row.get(4)?,
+                    well_known_name:   row.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(folders)
+    }
+
+    /// Get cached messages for a specific folder (by folder_id)
+    pub fn get_messages_for_folder(&self, folder_id: &str, limit: usize) -> Result<Vec<CachedMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, subject, from_email, from_name, body, received_at, is_read, cached_at
+             FROM messages
+             WHERE folder_id = ?1
+             ORDER BY received_at DESC
+             LIMIT ?2",
+        )?;
+
+        let messages = stmt
+            .query_map(params![folder_id, limit as i32], |row| {
+                Ok(CachedMessage {
+                    id:          row.get(0)?,
+                    subject:     row.get(1)?,
+                    from_email:  row.get(2)?,
+                    from_name:   row.get(3)?,
+                    body:        row.get(4)?,
+                    received_at: row.get(5)?,
+                    is_read:     row.get(6)?,
+                    cached_at:   row.get(7)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(messages)
     }
 }
