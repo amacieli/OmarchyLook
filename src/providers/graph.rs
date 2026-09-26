@@ -135,14 +135,15 @@ impl super::EmailProvider for GraphEmailProvider {
         if let Some(values) = json["value"].as_array() {
             for f in values {
                 folders.push(MailFolder {
-                    id:                f["id"].as_str().unwrap_or("").to_string(),
-                    display_name:      f["displayName"].as_str().unwrap_or("").to_string(),
-                    parent_folder_id:  f["parentFolderId"].as_str().map(|s| s.to_string()),
+                    id:               f["id"].as_str().unwrap_or("").to_string(),
+                    display_name:     f["displayName"].as_str().unwrap_or("").to_string(),
+                    parent_folder_id: f["parentFolderId"].as_str().map(|s| s.to_string()),
                     unread_item_count: f["unreadItemCount"].as_i64().map(|n| n as i32),
                     total_item_count:  f["totalItemCount"].as_i64().map(|n| n as i32),
-                    well_known_name:   f["wellKnownName"].as_str()
-                                        .filter(|s| !s.is_empty())
-                                        .map(|s| s.to_string()),
+                    // wellKnownName is NOT a v1.0 API property — infer from displayName
+                    well_known_name: infer_well_known_name(
+                        f["displayName"].as_str().unwrap_or("")
+                    ),
                 });
             }
         }
@@ -157,5 +158,28 @@ impl super::EmailProvider for GraphEmailProvider {
             crate::errors::OmarchyError::AuthError("Token check failed".to_string())
         });
         Ok(token.is_ok() && !token.unwrap_or_default().is_empty())
+    }
+}
+
+/// Infer well-known folder name from displayName.
+///
+/// The Graph API v1.0 `mailFolder` resource does NOT include a `wellKnownName` property
+/// (it was added in beta only, and even there it's not reliable for all locales).
+/// Instead, well-known names are used as path segments in URLs (e.g. /me/mailFolders/inbox).
+/// We infer sort order from the English display name; for non-English mailboxes the
+/// sort_order fallback of 999 keeps custom folders at the bottom, which is acceptable.
+/// See: https://learn.microsoft.com/en-us/graph/api/resources/mailfolder?view=graph-rest-1.0
+fn infer_well_known_name(display_name: &str) -> Option<String> {
+    match display_name.to_lowercase().as_str() {
+        "inbox"                 => Some("inbox".to_string()),
+        "drafts"                => Some("drafts".to_string()),
+        "sent items"            => Some("sentitems".to_string()),
+        "deleted items"         => Some("deleteditems".to_string()),
+        "junk email"            => Some("junkemail".to_string()),
+        "archive"               => Some("archive".to_string()),
+        "outbox"                => Some("outbox".to_string()),
+        "conversation history"  => Some("conversationhistory".to_string()),
+        "clutter"               => Some("clutter".to_string()),
+        _                       => None,
     }
 }

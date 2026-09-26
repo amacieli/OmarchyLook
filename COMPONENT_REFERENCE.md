@@ -299,17 +299,80 @@
 - [Graph Overview](https://learn.microsoft.com/en-us/graph/)
 - [API Reference](https://learn.microsoft.com/en-us/graph/api/overview)
 - [Authentication Concepts](https://learn.microsoft.com/en-us/graph/auth/auth-concepts)
-- [Message Resource](https://learn.microsoft.com/en-us/graph/api/resources/message)
+- [Message Resource](https://learn.microsoft.com/en-us/graph/api/resources/message?view=graph-rest-1.0)
+- [mailFolder Resource](https://learn.microsoft.com/en-us/graph/api/resources/mailfolder?view=graph-rest-1.0)
+- [List mailFolders](https://learn.microsoft.com/en-us/graph/api/user-list-mailfolders?view=graph-rest-1.0)
+- [List messages in folder](https://learn.microsoft.com/en-us/graph/api/mailfolder-list-messages?view=graph-rest-1.0)
 - [User Resource](https://learn.microsoft.com/en-us/graph/api/resources/user)
 - [User OAuth2 Flow](https://learn.microsoft.com/en-us/graph/auth-v2-user)
 - [Device Code Flow (CRITICAL)](https://learn.microsoft.com/en-us/graph/auth-oauth-device-code)
+- [OData Query Parameters](https://learn.microsoft.com/en-us/graph/query-parameters)
+
+**mailFolder resource — official v1.0 properties** (from docs, last updated 2024-08-23):
+
+| Property | Type | Selectable | Description |
+|---|---|---|---|
+| id | String | ✅ | Unique identifier |
+| displayName | String | ✅ | Display name |
+| parentFolderId | String | ✅ | Parent folder ID |
+| childFolderCount | Int32 | ✅ | Number of child folders |
+| totalItemCount | Int32 | ✅ | Total items in folder |
+| unreadItemCount | Int32 | ✅ | Unread item count |
+| isHidden | Boolean | ✅ | Whether folder is hidden |
+
+> ⚠️ **CRITICAL**: `wellKnownName` is **NOT** a v1.0 property. It exists in beta only and is unreliable. Using it in `$select` causes a 400 Bad Request. Well-known names (inbox, drafts, sentitems, etc.) are **URL path segments only** — use them in the URL like `/me/mailFolders/inbox`, not as a field to read back from the API. We infer them locally from `displayName` via `infer_well_known_name()` in `graph.rs`.
+
+**Well-known folder names** (use as URL path segments, not API fields):
+
+| Name | Description |
+|---|---|
+| `inbox` | Inbox |
+| `drafts` | Drafts |
+| `sentitems` | Sent Items |
+| `deleteditems` | Deleted Items |
+| `junkemail` | Junk Email |
+| `archive` | Archive |
+| `outbox` | Outbox |
+| `clutter` | Clutter (low-priority) |
+| `conversationhistory` | Skype IM history |
+| `msgfolderroot` | Root of all mail folders |
+| `recoverableitemsdeletions` | Soft-deleted items |
+
+**message resource — official v1.0 properties used in omarchylook:**
+
+| Property | Type | Notes |
+|---|---|---|
+| id | String | Unique; changes on folder move unless `Prefer: IdType="ImmutableId"` |
+| subject | String | |
+| from | recipient | Object: `{ emailAddress: { name, address } }` |
+| receivedDateTime | DateTimeOffset | ISO 8601 UTC |
+| bodyPreview | String | First 255 chars, plain text |
+| isRead | Boolean | |
+| parentFolderId | String | ID of containing folder |
+| isDraft | Boolean | |
+| hasAttachments | Boolean | Does not include inline attachments |
+| importance | String | `low`, `normal`, `high` |
+| conversationId | String | |
+
+**Valid `$select` fields for messages:** `id,subject,from,receivedDateTime,bodyPreview,isRead,parentFolderId,isDraft,hasAttachments,importance,conversationId`
+
+**Valid `$select` fields for mailFolders:** `id,displayName,parentFolderId,childFolderCount,totalItemCount,unreadItemCount,isHidden`
 
 **Endpoint Examples:**
-- List messages: `GET /me/mailFolders/inbox/messages`
+- List folders: `GET /me/mailFolders?$top=100&$select=id,displayName,parentFolderId,unreadItemCount,totalItemCount`
+- List messages in folder: `GET /me/mailFolders/{id}/messages?$top=10&$select=id,subject,from,receivedDateTime,bodyPreview,isRead,parentFolderId`
+- List messages (well-known): `GET /me/mailFolders/inbox/messages?$top=10`
+- Include hidden folders: `GET /me/mailFolders?includeHiddenFolders=true`
 - Send message: `POST /me/sendMail`
 - Get user profile: `GET /me`
 
-**Notes:** Microsoft Graph REST API for mail, user, settings; Device Code Flow for auth (no browser required)
+**Notes:**
+- Graph API v1.0 is the stable channel; avoid beta for production features
+- `$select` reduces response payload — always use it; invalid fields cause 400 Bad Request
+- `wellKnownName` was a beta-only field, never in v1.0; do not use it in `$select`
+- List mailFolders only returns **direct children of root** by default; use `/childFolders` to recurse
+- Default response excludes hidden folders; add `?includeHiddenFolders=true` to include them
+- `parentFolderId` on messages maps to `id` on the containing mailFolder
 
 ### Azure AD
 
