@@ -112,6 +112,8 @@ Rectangle {
                     loginButton.isPressed = true
                     parent.children[0].text = "  ⟳ Signing in...  "
                     authBridge.login()
+                    // Start polling for device code file
+                    deviceCodePoller.start()
                 }
             }
 
@@ -161,22 +163,86 @@ Rectangle {
         }
     }
 
+    // Timer to poll for device code file (since we use static qmlscene, not cxx-qt FFI bridges)
+    Timer {
+        id: deviceCodePoller
+        interval: 500  // Poll every 500ms
+        repeat: true
+        running: false
+
+        onTriggered: {
+            try {
+                // Call Rust backend to read device_code.json
+                const deviceCodeJson = authBridge.getDeviceCode()
+                if (deviceCodeJson && deviceCodeJson.length > 0) {
+                    const deviceCode = JSON.parse(deviceCodeJson)
+                    if (deviceCode.user_code && deviceCode.verification_uri) {
+                        deviceCodeDialog.userCode = deviceCode.user_code
+                        deviceCodeDialog.verificationUri = deviceCode.verification_uri
+                        deviceCodeDialog.expiresIn = deviceCode.expires_in || 900
+                        deviceCodeDialog.open()
+                        deviceCodePoller.stop()  // Stop polling once dialog is shown
+                    }
+                }
+            } catch (e) {
+                // Keep polling until device code appears
+                console.log("Waiting for device code...", e)
+            }
+        }
+    }
+
     // Device Code Dialog (TUI style)
     Popup {
         id: deviceCodeDialog
         anchors.centerIn: parent
         width: 500
-        height: 320
+        height: 380
         modal: true
         focus: true
 
         property string userCode: ""
         property string verificationUri: ""
+        property int expiresIn: 900
+        property int secondsRemaining: 900
 
         background: Rectangle {
             color: "#0d0d0d"
             border.color: "#7c6af7"
             border.width: 1
+        }
+
+        // Countdown timer for expiration
+        Timer {
+            id: expirationCountdown
+            interval: 1000  // Update every second
+            repeat: true
+            running: deviceCodeDialog.visible
+
+            onTriggered: {
+                deviceCodeDialog.secondsRemaining--;
+                if (deviceCodeDialog.secondsRemaining <= 0) {
+                    expirationCountdown.stop();
+                    deviceCodeDialog.close();
+                    errorMessage.text = "Device code expired. Please try again.";
+                }
+            }
+        }
+
+        onOpened: {
+            expirationCountdown.start();
+            deviceCodeDialog.secondsRemaining = deviceCodeDialog.expiresIn;
+        }
+
+        onClosed: {
+            expirationCountdown.stop()
+            deviceCodePoller.stop()
+            // Clean up the device code file via Rust backend
+            try {
+                authBridge.clearDeviceCode()
+            } catch (e) {
+                // Ignore cleanup errors
+                console.log("Error clearing device code:", e)
+            }
         }
 
         ColumnLayout {
@@ -253,6 +319,15 @@ Rectangle {
                         copyTimer.start()
                     }
                 }
+            }
+
+            // Expiration countdown
+            Text {
+                text: "Expires in: " + deviceCodeDialog.secondsRemaining + "s"
+                font.family: root.monoFont
+                font.pixelSize: root.hintSize
+                color: deviceCodeDialog.secondsRemaining < 60 ? "#ff6b6b" : "#888888"
+                Layout.alignment: Qt.AlignHCenter
             }
 
             // Copy feedback

@@ -9,6 +9,8 @@ Rectangle {
     required property var mailListBridge
     required property var settingsManager
     
+    signal showDetailView(int index)
+    
     // UI settings from SettingsManager
     property string monoFont: settingsManager ? settingsManager.get_font_family() : "monospace"
     property int baseSize: settingsManager ? settingsManager.get_base_size() : 10
@@ -19,10 +21,10 @@ Rectangle {
         anchors.margins: 0
         spacing: 0
         
-        // Top bar with title and controls
+        // Search bar + filter controls
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 40
+            Layout.preferredHeight: 50
             color: "#1a1a1a"
             border.bottom.color: "#333333"
             border.bottom.width: 1
@@ -32,136 +34,221 @@ Rectangle {
                 anchors.margins: 8
                 spacing: 8
                 
-                Text {
-                    text: "Inbox"
-                    font.family: root.monoFont
-                    font.pixelSize: root.titleSize
-                    font.bold: true
-                    color: "#7c6af7"
+                // Search input
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 36
+                    color: "#0d0d0d"
+                    border.color: "#7c6af7"
+                    border.width: 1
+                    
+                    TextInput {
+                        id: searchInput
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        font.family: root.monoFont
+                        font.pixelSize: root.baseSize
+                        color: "#e8e8e8"
+                        cursorVisible: true
+                        selectionColor: "#7c6af7"
+                        placeholderText: "Search..."
+                        
+                        onTextChanged: {
+                            // Live search: debounced via Timer
+                            searchTimer.restart()
+                        }
+                    }
+                    
+                    Timer {
+                        id: searchTimer
+                        interval: 300
+                        onTriggered: {
+                            if (mailListBridge && searchInput.text !== undefined) {
+                                mailListBridge.search(searchInput.text)
+                            }
+                        }
+                    }
                 }
                 
-                Item { Layout.fillWidth: true }
-                
-                // Refresh button
+                // Filter buttons
                 Rectangle {
                     Layout.preferredWidth: 80
-                    Layout.preferredHeight: 28
+                    Layout.preferredHeight: 36
                     color: "#0d0d0d"
-                    border.color: refreshMouse.containsMouse ? "#9f8fff" : "#7c6af7"
+                    border.color: filterUnreadMouse.containsMouse ? "#9f8fff" : "#7c6af7"
                     border.width: 1
                     
                     Text {
                         anchors.centerIn: parent
-                        text: "⟲ Refresh"
+                        text: "Unread"
                         font.family: root.monoFont
-                        font.pixelSize: root.baseSize
-                        color: refreshMouse.containsMouse ? "#9f8fff" : "#7c6af7"
+                        font.pixelSize: root.baseSize - 2
+                        color: filterUnreadMouse.containsMouse ? "#9f8fff" : "#7c6af7"
                     }
                     
                     MouseArea {
-                        id: refreshMouse
+                        id: filterUnreadMouse
                         anchors.fill: parent
                         hoverEnabled: true
                         onClicked: {
-                            mailListBridge.fetch_emails()
+                            if (mailListBridge) {
+                                mailListBridge.filter_unread()
+                            }
+                        }
+                    }
+                }
+                
+                // Clear filters
+                Rectangle {
+                    Layout.preferredWidth: 60
+                    Layout.preferredHeight: 36
+                    color: "#0d0d0d"
+                    border.color: clearMouse.containsMouse ? "#9f8fff" : "#7c6af7"
+                    border.width: 1
+                    
+                    Text {
+                        anchors.centerIn: parent
+                        text: "Clear"
+                        font.family: root.monoFont
+                        font.pixelSize: root.baseSize - 2
+                        color: clearMouse.containsMouse ? "#9f8fff" : "#7c6af7"
+                    }
+                    
+                    MouseArea {
+                        id: clearMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: {
+                            if (mailListBridge) {
+                                mailListBridge.clear_filters()
+                                searchInput.text = ""
+                            }
                         }
                     }
                 }
             }
         }
         
-        // Mail list (scrollable)
-        ScrollView {
+        // Email count
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 28
+            color: "#1a1a1a"
+            border.bottom.color: "#333333"
+            border.bottom.width: 1
+            
+            Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Inbox (" + (mailListBridge ? mailListBridge.email_count() : 0) + ") — Unread: " + (mailListBridge ? mailListBridge.get_unread_count() : 0)
+                font.family: root.monoFont
+                font.pixelSize: root.baseSize
+                color: "#888888"
+            }
+        }
+        
+        // Email list
+        ListView {
             Layout.fillWidth: true
             Layout.fillHeight: true
             
-            Column {
-                width: root.width - 16
-                spacing: 1
+            model: mailListBridge ? mailListBridge.email_count() : 0
+            delegate: Rectangle {
+                width: parent.width
+                height: 60
+                color: delegateMouse.containsMouse ? "#1a1a1a" : "#0d0d0d"
+                border.bottom.color: "#333333"
+                border.bottom.width: 1
                 
-                Repeater {
-                    model: mailListBridge.email_count()
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    spacing: 4
                     
-                    Rectangle {
-                        width: parent.width
-                        height: 60
-                        color: listItemMouse.containsMouse ? "#242424" : "#0d0d0d"
-                        border.color: "#333333"
-                        border.width: 1
+                    // Subject + unread indicator
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
                         
-                        ColumnLayout {
-                            anchors.fill: parent
-                            anchors.margins: 8
-                            spacing: 2
-                            
-                            // From and subject in one row
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 12
-                                
-                                Text {
-                                    text: mailListBridge.get_email(index).from
-                                    font.family: root.monoFont
-                                    font.pixelSize: root.baseSize
-                                    font.bold: true
-                                    color: "#e8e8e8"
-                                    elide: Text.ElideRight
-                                    Layout.preferredWidth: 150
-                                }
-                                
-                                Text {
-                                    text: mailListBridge.get_email(index).subject
-                                    font.family: root.monoFont
-                                    font.pixelSize: root.baseSize
-                                    color: mailListBridge.get_email(index).is_read ? "#888888" : "#e8e8e8"
-                                    elide: Text.ElideRight
-                                    Layout.fillWidth: true
-                                }
-                                
-                                Text {
-                                    text: mailListBridge.get_email(index).received_at
-                                    font.family: root.monoFont
-                                    font.pixelSize: root.baseSize
-                                    color: "#888888"
-                                    Layout.preferredWidth: 120
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                            }
-                            
-                            // Preview text
-                            Text {
-                                text: mailListBridge.get_email(index).preview
-                                font.family: root.monoFont
-                                font.pixelSize: root.baseSize
-                                color: "#888888"
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
+                        // Unread dot
+                        Rectangle {
+                            Layout.preferredWidth: 8
+                            Layout.preferredHeight: 8
+                            radius: 4
+                            visible: mailListBridge && !mailListBridge.get_email(index).is_read
+                            color: "#4ade80"
                         }
                         
-                        MouseArea {
-                            id: listItemMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            onClicked: {
-                                console.log("Clicked email at index", index)
-                                mailListBridge.mark_as_read(index)
-                            }
+                        Text {
+                            text: mailListBridge ? mailListBridge.get_email(index).subject : "Loading..."
+                            font.family: root.monoFont
+                            font.pixelSize: root.titleSize
+                            font.bold: mailListBridge && !mailListBridge.get_email(index).is_read
+                            color: "#7c6af7"
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
                         }
+                    }
+                    
+                    // From + date
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 12
+                        
+                        Text {
+                            text: mailListBridge ? mailListBridge.get_email(index).from_email : "..."
+                            font.family: root.monoFont
+                            font.pixelSize: root.baseSize
+                            color: "#888888"
+                            Layout.preferredWidth: 200
+                            elide: Text.ElideRight
+                        }
+                        
+                        Item { Layout.fillWidth: true }
+                        
+                        Text {
+                            text: mailListBridge ? mailListBridge.get_email(index).received_at : ""
+                            font.family: root.monoFont
+                            font.pixelSize: root.baseSize - 2
+                            color: "#666666"
+                        }
+                    }
+                    
+                    // Preview
+                    Text {
+                        text: mailListBridge ? mailListBridge.get_email(index).preview : ""
+                        font.family: root.monoFont
+                        font.pixelSize: root.baseSize
+                        color: "#cccccc"
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                        maximumLineCount: 1
                     }
                 }
                 
-                // Empty state
-                Text {
-                    visible: mailListBridge.email_count() === 0
-                    text: "No emails. Try refreshing."
-                    font.family: root.monoFont
-                    font.pixelSize: root.baseSize
-                    color: "#888888"
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    y: parent.height / 2
+                MouseArea {
+                    id: delegateMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onClicked: {
+                        root.showDetailView(index)
+                    }
                 }
             }
+            
+            ScrollBar.vertical: ScrollBar {
+                policy: ScrollBar.AsNeeded
+                palette.mid: "#555555"
+                palette.base: "#0d0d0d"
+            }
+        }
+    }
+    
+    // Initialization: Load emails on creation
+    Component.onCompleted: {
+        if (mailListBridge) {
+            mailListBridge.fetch_emails()
         }
     }
 }

@@ -7,13 +7,20 @@ Rectangle {
     color: "#0d0d0d"
 
     required property var authBridge
+    required property bool isAuthenticated
     property var settingsManagerRef: typeof settingsManager !== 'undefined' ? settingsManager : null
+    property var composeBridgeRef: typeof composeBridge !== 'undefined' ? composeBridge : null
 
     // Use system monospace font (respects terminal font settings)
     property string monoFont: settingsManagerRef ? settingsManagerRef.get_font_family() : "monospace"
     property int baseSize: settingsManagerRef ? settingsManagerRef.get_base_size() : 10
     property int titleSize: settingsManagerRef ? settingsManagerRef.get_title_size() : 12
     property int hintSize: settingsManagerRef ? settingsManagerRef.get_hint_size() : 8
+    
+    // Track current view state
+    property string currentView: "mail"  // "mail", "compose", or "settings"
+    property string mailView: "list"  // "list" or "detail" (sub-views for mail)
+    property int selectedEmailIndex: -1  // Track which email is selected
 
     ColumnLayout {
         anchors.fill: parent
@@ -52,6 +59,33 @@ Rectangle {
                     font.weight: Font.Bold
                     color: "#7c6af7"
                     Layout.fillWidth: true
+                }
+                
+                // Compose button
+                Rectangle {
+                    Layout.preferredWidth: 120
+                    Layout.preferredHeight: 28
+                    color: "#0d0d0d"
+                    border.color: composeBtnMouse.containsMouse ? "#51cf66" : "#7c6af7"
+                    border.width: 1
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "✎ Compose"
+                        font.family: root.monoFont
+                        font.pixelSize: root.baseSize
+                        color: composeBtnMouse.containsMouse ? "#51cf66" : "#7c6af7"
+                    }
+
+                    MouseArea {
+                        id: composeBtnMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: {
+                            root.currentView = (root.currentView === "mail") ? "compose" : "mail"
+                            console.log("Switching to: " + root.currentView)
+                        }
+                    }
                 }
             }
         }
@@ -202,8 +236,8 @@ Rectangle {
                         Layout.rightMargin: 8
                         Layout.topMargin: 4
 
-                        color: "#0d0d0d"
-                        border.color: "#333333"
+                        color: root.currentView === "settings" ? "#7c6af7" : "#0d0d0d"
+                        border.color: root.currentView === "settings" ? "#7c6af7" : "#333333"
                         border.width: 1
 
                         Text {
@@ -211,52 +245,26 @@ Rectangle {
                             text: "[S] Settings"
                             font.family: root.monoFont
                             font.pixelSize: root.baseSize
-                            color: "#666666"
+                            color: root.currentView === "settings" ? "#0d0d0d" : "#666666"
                         }
 
                         MouseArea {
                             anchors.fill: parent
                             hoverEnabled: true
                             onEntered: parent.border.color = "#9f8fff"
-                            onExited: parent.border.color = "#333333"
-                        }
-                    }
-
-
-                    Item { Layout.fillHeight: true }
-
-                    // Logout button (TUI style)
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 32
-                        Layout.margins: 8
-
-                        color: "#0d0d0d"
-                        border.color: logoutMouse.containsMouse ? "#ff8787" : "#7c6af7"
-                        border.width: 1
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "  ✕ Logout  "
-                            font.family: root.monoFont
-                            font.pixelSize: root.baseSize
-                            color: logoutMouse.containsMouse ? "#ff8787" : "#7c6af7"
-                        }
-
-                        MouseArea {
-                            id: logoutMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
+                            onExited: parent.border.color = root.currentView === "settings" ? "#7c6af7" : "#333333"
                             onClicked: {
-                                // TODO: emit logout signal via authBridge
-                                console.log("Logout clicked")
+                                root.currentView = "settings"
+                                console.log("Switching to Settings")
                             }
                         }
                     }
+
+                    Item { Layout.fillHeight: true }
                 }
             }
 
-            // Main content area (TUI style)
+            // Main content area (TUI style) - switches between views
             Rectangle {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -264,54 +272,67 @@ Rectangle {
                 border.color: "#7c6af7"
                 border.width: 1
 
-                ColumnLayout {
+                // Content loader - switches between mail, compose, and settings views
+                Loader {
+                    id: contentLoader
                     anchors.fill: parent
-                    anchors.margins: 16
-                    spacing: 12
-
-                    // Content header
-                    Text {
-                        text: "┌─ Mail (Phase 2 Placeholder) ─┐"
-                        font.family: root.monoFont
-                        font.pixelSize: root.baseSize
-                        color: "#7c6af7"
-                        Layout.alignment: Qt.AlignHCenter
+                    sourceComponent: {
+                        if (root.currentView === "compose") {
+                            return composeViewComponent
+                        } else if (root.currentView === "settings") {
+                            return settingsViewComponent
+                        } else {
+                            return mailViewComponent
+                        }
                     }
+                }
 
-                    Text {
-                        text: "Navigation modules loading...\nKeyboard shortcuts: [M]ail, [C]alendar, [P]hotos, [T]asks"
-                        font.family: root.monoFont
-                        font.pixelSize: root.baseSize
-                        color: "#cccccc"
-                        wrapMode: Text.Wrap
-                        Layout.fillWidth: true
+                Component {
+                    id: composeViewComponent
+                    ComposeMail {
+                        composeBridge: root.composeBridgeRef
+                        settingsManager: root.settingsManagerRef
                     }
+                }
 
-                    Item { Layout.fillHeight: true }
-
-                    Text {
-                        text: "┌──────────────────────────────┐"
-                        font.family: root.monoFont
-                        font.pixelSize: root.baseSize
-                        color: "#7c6af7"
-                        Layout.alignment: Qt.AlignHCenter
+                Component {
+                    id: settingsViewComponent
+                    SettingsPanel {
+                        authBridge: root.authBridge
+                        settingsManager: root.settingsManagerRef
+                        isAuthenticated: root.isAuthenticated
                     }
+                }
 
-                    Text {
-                        text: "Phase 3 coming soon: Email list, message view, calendar, contacts, task management"
-                        font.family: root.monoFont
-                        font.pixelSize: root.baseSize
-                        color: "#888888"
-                        horizontalAlignment: Text.AlignHCenter
-                        Layout.fillWidth: true
+                Component {
+                    id: mailViewComponent
+                    Loader {
+                        anchors.fill: parent
+                        sourceComponent: root.mailView === "detail" ? messageDetailComponent : mailListComponent
                     }
+                }
 
-                    Text {
-                        text: "└──────────────────────────────┘"
-                        font.family: root.monoFont
-                        font.pixelSize: root.baseSize
-                        color: "#7c6af7"
-                        Layout.alignment: Qt.AlignHCenter
+                Component {
+                    id: mailListComponent
+                    MailListView {
+                        mailListBridge: typeof mailListBridge !== 'undefined' ? mailListBridge : null
+                        settingsManager: root.settingsManagerRef
+                        onShowDetailView: {
+                            root.selectedEmailIndex = index
+                            root.mailView = "detail"
+                        }
+                    }
+                }
+
+                Component {
+                    id: messageDetailComponent
+                    MessageDetail {
+                        mailListBridge: typeof mailListBridge !== 'undefined' ? mailListBridge : null
+                        settingsManager: root.settingsManagerRef
+                        selectedIndex: root.selectedEmailIndex
+                        onBackToList: {
+                            root.mailView = "list"
+                        }
                     }
                 }
             }

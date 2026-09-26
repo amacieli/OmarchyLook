@@ -7,6 +7,8 @@ Rectangle {
     color: "#0d0d0d"
 
     required property var settingsManager
+    required property var authBridge
+    required property bool isAuthenticated
 
     property string monoFont: settingsManager.get_font_family()
     property int baseSize: settingsManager.get_base_size()
@@ -234,6 +236,81 @@ Rectangle {
                     }
 
                     Item { Layout.fillWidth: true }
+                }
+
+                // Account Settings Section
+                Text {
+                    text: "Account Settings"
+                    font.family: root.monoFont
+                    font.pixelSize: root.baseSize
+                    font.bold: true
+                    color: "#7c6af7"
+                    Layout.fillWidth: true
+                }
+
+                // Graph API Authentication button
+                // Shows different button based on authentication state
+                Rectangle {
+                    id: authButton
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 40
+                    color: root.isAuthenticated ? "#1a3a1a" : "#1a1a1a"
+                    border.color: root.isAuthenticated ? "#51cf66" : "#333333"
+                    border.width: 1
+                    
+                    // Hover effect
+                    MouseArea {
+                        id: authButtonMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        
+                        onEntered: {
+                            if (root.isAuthenticated) {
+                                parent.border.color = "#ff6b6b"
+                            } else {
+                                parent.border.color = "#7c6af7"
+                            }
+                        }
+                        
+                        onExited: {
+                            parent.border.color = root.isAuthenticated ? "#51cf66" : "#333333"
+                        }
+                        
+                        onClicked: {
+                            if (root.isAuthenticated) {
+                                // Logout
+                                console.log("[Settings] Logout button clicked")
+                                var result = authBridge.logout()
+                                if (result) {
+                                    console.log("[Settings] Logout successful")
+                                    // The parent window will detect auth state change
+                                    // and reload the UI
+                                } else {
+                                    console.error("[Settings] Logout failed")
+                                }
+                            } else {
+                                // Login
+                                console.log("[Settings] Authenticate button clicked")
+                                var result = authBridge.login()
+                                if (result) {
+                                    console.log("[Settings] Device Flow initiated")
+                                } else {
+                                    console.error("[Settings] Failed to start Device Flow")
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: root.isAuthenticated ? "  ✓ Logged in with Microsoft  " : "  🔐 Click to authenticate with Microsoft Graph  "
+                        font.family: root.monoFont
+                        font.pixelSize: root.baseSize
+                        color: root.isAuthenticated ? "#51cf66" : "#7c6af7"
+                    }
+                }
+
+                    }
                 }
 
                 Item { Layout.fillHeight: true }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 
 /// Device Flow OAuth response from Microsoft
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DeviceFlowResponse {
     pub device_code: String,
     pub user_code: String,
@@ -93,6 +93,13 @@ pub struct FontSettings {
     pub scale_factor: f64,
 }
 
+impl FontSettings {
+    /// Calculate effective font size: base_size * scale_factor
+    pub fn effective_size(&self) -> i32 {
+        (self.base_size as f64 * self.scale_factor).round() as i32
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ColorSettings {
     pub bg_dark: String,
@@ -127,8 +134,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             font: FontSettings {
-                family: "monospace".to_string(),
-                base_size: 10,
+                family: "JetBrainsMono Nerd Font".to_string(),
+                base_size: 14,
                 scale_factor: 1.0,
             },
             color: ColorSettings {

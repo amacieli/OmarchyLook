@@ -107,6 +107,7 @@ echo ""
 # Set environment variables for the binary
 export QML_DIR="$QML_DIR"
 export RUST_LOG="${RUST_LOG:-omarchy_look=debug,info}"
+export QML_XHR_ALLOW_FILE_READ=1
 
 # Run the binary
 # The binary handles Qt/QML initialization and loads from QML_DIR

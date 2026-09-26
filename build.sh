@@ -99,12 +99,17 @@ if [ ! -f "$BINARY" ]; then
     exit 1
 fi
 
+# Create a symlink named "omarchylook" (no hyphen) in the project root
+ln -sf "$(realpath "$BINARY")" "$(pwd)/omarchylook"
+
 echo -e "${GREEN}✓ Build successful${NC}"
 echo -e "${GREEN}Binary: $(realpath "$BINARY")${NC}"
 echo -e "${GREEN}Size: $(du -h "$BINARY" | cut -f1)${NC}"
+echo -e "${GREEN}Symlink: $(realpath ./omarchylook)${NC}"
 
 # === SUMMARY ===
 echo -e "\n${GREEN}=== Build Summary ===${NC}"
 echo "Output binary: $BINARY"
-echo "To run: ./run.sh"
-echo "To run with release build: QML_DIR=qml ./run.sh --release"
+echo "Executable (no hyphen): ./omarchylook"
+echo "To run: ./omarchylook"
+echo "To run with release build: QML_DIR=qml ./build.sh --release && ./omarchylook"

@@ -41,6 +41,8 @@ env_logger = "0.11"
 anyhow = "1.0"
 thiserror = "1.0"
 urlencoding = "2.1"
+regex = "1.10"
+dirs = "7.0.0"
 
 [build-dependencies]
 # Qt build integration - Phase 2
@@ -53,7 +55,7 @@ path = "src/main.rs"
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = false
 codegen-units = 1
 strip = true
 

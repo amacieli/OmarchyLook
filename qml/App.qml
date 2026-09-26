@@ -28,7 +28,18 @@ ApplicationWindow {
     property var authBridgeRef: typeof authBridge !== 'undefined' ? authBridge : null
     
     // Track auth state to switch between login and app shell
+    // Initialize from authBridge when it becomes available
     property bool isAuthenticated: false
+    
+    // Initialize auth state when component is ready
+    Component.onCompleted: {
+        if (authBridgeRef) {
+            isAuthenticated = authBridgeRef.is_authenticated()
+            console.log("App.qml: Initialized isAuthenticated =", isAuthenticated)
+        } else {
+            console.warn("App.qml: authBridge not available on startup")
+        }
+    }
 
     // Defer sourceComponent until authBridge is available (loaded from context)
     Loader {
@@ -40,13 +51,14 @@ ApplicationWindow {
     // Listen for auth state changes
     Connections {
         target: authBridgeRef
+        enabled: authBridgeRef !== null
         function onLoginSucceeded() {
             console.log("App.qml: Auth succeeded, switching to AppShell")
-            root.isAuthenticated = true
+            isAuthenticated = true
         }
         function onLogoutSucceeded() {
             console.log("App.qml: Logout succeeded, switching to LoginScreen")
-            root.isAuthenticated = false
+            isAuthenticated = false
         }
     }
 
@@ -71,6 +83,7 @@ ApplicationWindow {
         id: appShellComponent
         AppShell {
             authBridge: root.authBridgeRef
+            isAuthenticated: root.isAuthenticated
         }
     }
 }

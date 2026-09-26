@@ -124,9 +124,16 @@ impl GraphClient {
         Ok(msg_resp.value)
     }
     
-    /// Create and send a message
-    pub fn send_mail(&self, to: &[&str], subject: &str, body: &str) -> Result<String> {
-        debug!("Sending mail to {} recipients", to.len());
+    /// Create and send a message (with CC and BCC support)
+    pub fn send_mail(
+        &self,
+        to: &[&str],
+        cc: &[&str],
+        bcc: &[&str],
+        subject: &str,
+        body: &str,
+    ) -> Result<String> {
+        debug!("Sending mail to {} recipients (cc: {}, bcc: {})", to.len(), cc.len(), bcc.len());
         
         let to_recipients: Vec<_> = to.iter()
             .map(|addr| serde_json::json!({
@@ -136,15 +143,43 @@ impl GraphClient {
             }))
             .collect();
         
+        let cc_recipients: Vec<_> = cc.iter()
+            .map(|addr| serde_json::json!({
+                "emailAddress": {
+                    "address": addr
+                }
+            }))
+            .collect();
+        
+        let bcc_recipients: Vec<_> = bcc.iter()
+            .map(|addr| serde_json::json!({
+                "emailAddress": {
+                    "address": addr
+                }
+            }))
+            .collect();
+        
+        let mut message = serde_json::json!({
+            "subject": subject,
+            "body": {
+                "contentType": "HTML",
+                "content": body
+            },
+            "toRecipients": to_recipients
+        });
+        
+        // Add CC if present
+        if !cc_recipients.is_empty() {
+            message["ccRecipients"] = cc_recipients.into();
+        }
+        
+        // Add BCC if present
+        if !bcc_recipients.is_empty() {
+            message["bccRecipients"] = bcc_recipients.into();
+        }
+        
         let payload = serde_json::json!({
-            "message": {
-                "subject": subject,
-                "body": {
-                    "contentType": "HTML",
-                    "content": body
-                },
-                "toRecipients": to_recipients
-            }
+            "message": message
         });
         
         let url = format!("{}/me/sendMail", GRAPH_API_BASE);
@@ -156,8 +191,10 @@ impl GraphClient {
             .map_err(|e| OmarchyError::HttpError(e.to_string()))?;
         
         if resp.status() < 200 || resp.status() >= 300 {
+            let status = resp.status();
+            let error_body = resp.into_string().unwrap_or_default();
             return Err(OmarchyError::HttpError(
-                format!("Failed to send mail: {}", resp.status())
+                format!("Failed to send mail: {} - {}", status, error_body)
             ));
         }
         

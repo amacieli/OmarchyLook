@@ -13,6 +13,11 @@ Rectangle {
     property int baseSize: settingsManager ? settingsManager.get_base_size() : 10
     property int titleSize: settingsManager ? settingsManager.get_title_size() : 12
 
+    // Track send status
+    property bool isSending: false
+    property string statusMessage: ""
+    property bool isError: false
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 12
@@ -251,16 +256,31 @@ Rectangle {
                     anchors.fill: parent
                     hoverEnabled: true
                     onClicked: {
-                        if (composeBridge.send()) {
-                            sendStatus.text = "✓ Email sent!"
-                            sendTimer.start()
+                        if (root.isSending) return  // Prevent double-send
+                        
+                        root.isSending = true
+                        root.statusMessage = "Sending..."
+                        root.isError = false
+                        
+                        // Call composeBridge.send()
+                        const success = composeBridge.send()
+                        
+                        if (success) {
+                            root.statusMessage = "✓ Email sent successfully!"
+                            root.isError = false
+                            // Clear form on success
                             toInput.clear()
                             subjectInput.clear()
                             bodyInput.clear()
-                        } else {
-                            sendStatus.text = "✕ Failed to send"
+                            // Hide status after 3 seconds
                             sendTimer.start()
+                        } else {
+                            root.statusMessage = "✕ Failed to send email"
+                            root.isError = true
+                            // Keep error visible longer
+                            errorTimer.start()
                         }
+                        root.isSending = false
                     }
                 }
             }
@@ -269,10 +289,10 @@ Rectangle {
         // Send status message
         Text {
             id: sendStatus
-            text: ""
+            text: root.statusMessage
             font.family: root.monoFont
             font.pixelSize: root.baseSize
-            color: "#51cf66"
+            color: root.isError ? "#ff6b6b" : "#51cf66"
             Layout.alignment: Qt.AlignHCenter
             visible: text.length > 0
         }
@@ -280,7 +300,13 @@ Rectangle {
         Timer {
             id: sendTimer
             interval: 3000
-            onTriggered: sendStatus.text = ""
+            onTriggered: root.statusMessage = ""
+        }
+        
+        Timer {
+            id: errorTimer
+            interval: 5000
+            onTriggered: root.statusMessage = ""
         }
     }
 }
