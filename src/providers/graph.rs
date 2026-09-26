@@ -117,7 +117,7 @@ impl super::EmailProvider for GraphEmailProvider {
 
         // Fetch top-level folders including well-known names
         let url = "https://graph.microsoft.com/v1.0/me/mailFolders?\
-                   $top=100&$select=id,displayName,parentFolderId,unreadItemCount,totalItemCount,wellKnownName"
+                   $top=100&$select=id,displayName,parentFolderId,unreadItemCount,totalItemCount"
             .to_string();
 
         let response = client
