@@ -347,6 +347,54 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     continue;
                 }
 
+                // ── GET /settings/ui — return UI settings as JSON ─────────────
+                if first_line.contains("GET /settings/ui") {
+                    let settings_path = config_dir.join("settings.toml");
+                    let body = match std::fs::read_to_string(&settings_path)
+                        .ok()
+                        .and_then(|s| toml::from_str::<omarchy_look::models::Settings>(&s).ok())
+                    {
+                        Some(settings) => format!(
+                            "{{\"sidebar_expanded\":{},\"window_width\":{},\"window_height\":{}}}",
+                            settings.ui.sidebar_expanded,
+                            settings.ui.window_width,
+                            settings.ui.window_height,
+                        ),
+                        None => "{\"sidebar_expanded\":true,\"window_width\":1280,\"window_height\":800}".to_string(),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── POST /settings/sidebar_expanded — persist sidebar state ────
+                if first_line.contains("POST /settings/sidebar_expanded") {
+                    // Body is "true" or "false" — read remaining request bytes
+                    let body_start = request.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+                    let body_str = request[body_start..].trim();
+                    let expanded = body_str == "true";
+
+                    let settings_path = config_dir.join("settings.toml");
+                    let result = std::fs::read_to_string(&settings_path)
+                        .ok()
+                        .and_then(|s| toml::from_str::<omarchy_look::models::Settings>(&s).ok())
+                        .map(|mut settings| {
+                            settings.ui.sidebar_expanded = expanded;
+                            toml::to_string_pretty(&settings)
+                                .ok()
+                                .map(|content| std::fs::write(&settings_path, content))
+                        });
+                    let ok = result.is_some();
+                    debug!("POST /settings/sidebar_expanded {} → {}", expanded, ok);
+
+                    let response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\nok";
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
                 // ── POST trigger routes ────────────────────────────────────
                 let action = if first_line.contains("POST /auth/login") {
                     "login"

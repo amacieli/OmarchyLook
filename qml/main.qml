@@ -53,11 +53,11 @@ Window {
 
     Component.onCompleted: {
         console.log("=== OmarchyLook QML Initialized ===")
-        // Deferred folder load — HTTP server needs ~1s to be ready
+        // Deferred load — HTTP server needs ~1s to be ready
         Qt.callLater(function() {
             Qt.createQmlObject(
-                'import QtQuick 2.15; Timer { interval: 2500; running: true; repeat: false; onTriggered: { root.loadFolders() } }',
-                root, "folderTimer"
+                'import QtQuick 2.15; Timer { interval: 1500; running: true; repeat: false; onTriggered: { root.loadUiSettings(); root.loadFolders() } }',
+                root, "initTimer"
             )
         })
     }
@@ -195,6 +195,31 @@ Window {
 
     // Folder data — populated by async XHR on load + folder pane activation
     ListModel { id: folderModel }
+
+    // Persist sidebar state to settings.toml via HTTP
+    onSidebarExpandedChanged: {
+        var xhr = new XMLHttpRequest()
+        xhr.open("POST", "http://127.0.0.1:27182/settings/sidebar_expanded", true)
+        xhr.send(root.sidebarExpanded ? "true" : "false")
+    }
+
+    function loadUiSettings() {
+        var xhr = new XMLHttpRequest()
+        xhr.open("GET", "http://127.0.0.1:27182/settings/ui", true)
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200) {
+                try {
+                    var s = JSON.parse(xhr.responseText)
+                    if (typeof s.sidebar_expanded === "boolean") {
+                        root.sidebarExpanded = s.sidebar_expanded
+                    }
+                } catch(e) {
+                    console.log("[Settings] Parse error:", e)
+                }
+            }
+        }
+        xhr.send()
+    }
 
     function loadFolders() {
         var xhr = new XMLHttpRequest()
@@ -344,7 +369,7 @@ Window {
                 // ── Sidebar ───────────────────────────────────────────
                 Rectangle {
                     id: sidebar
-                    Layout.preferredWidth: root.sidebarExpanded ? 160 : 42
+                    Layout.preferredWidth: root.sidebarExpanded ? 180 : 42
                     Layout.fillHeight: true
                     color: "#000000"
                     clip: true
@@ -536,7 +561,7 @@ Window {
                 Rectangle {
                     id: folderBar
                     visible: root.currentView === "mail"
-                    Layout.preferredWidth: root.currentView === "mail" ? 140 : 0
+                    Layout.preferredWidth: root.currentView === "mail" ? 180 : 0
                     Layout.fillHeight: true
                     color: "#000000"
                     clip: true

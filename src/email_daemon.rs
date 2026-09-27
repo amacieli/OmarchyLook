@@ -105,7 +105,7 @@ impl EmailDaemon {
                         .unwrap_or(true);
 
                     if should_sync_messages {
-                        match self.sync_messages().await {
+                        match self.sync_messages(is_first_run).await {
                             Ok(count) => {
                                 if count > 0 {
                                     info!("Successfully synced {} new emails", count);
@@ -150,19 +150,20 @@ impl EmailDaemon {
         Ok(count)
     }
 
-    /// Sync messages for all known folders (10 most recent per folder)
-    async fn sync_messages(&self) -> Result<usize> {
-        // Get cached folders to determine which ones to fetch from
+    /// Sync messages for all known folders
+    /// - First run (is_initial): full paginated sync via channel, non-blocking
+    /// - Subsequent runs: fetch 50 most recent per folder for incremental updates
+    async fn sync_messages(&self, is_initial: bool) -> Result<usize> {
         let folders = self.db.get_folders()?;
 
         if folders.is_empty() {
             // Fall back to inbox if no folders cached yet
-            return self.sync_folder_messages("inbox").await;
+            return self.sync_folder_messages("inbox", is_initial).await;
         }
 
         let mut total = 0;
         for folder in &folders {
-            match self.sync_folder_messages(&folder.id).await {
+            match self.sync_folder_messages(&folder.id, is_initial).await {
                 Ok(count) => total += count,
                 Err(e) => error!("Failed to sync folder {}: {}", folder.display_name, e),
             }
@@ -170,35 +171,72 @@ impl EmailDaemon {
         Ok(total)
     }
 
-    /// Fetch and insert new messages for a single folder
-    async fn sync_folder_messages(&self, folder_id: &str) -> Result<usize> {
-        debug!("Syncing messages for folder: {}", folder_id);
-        let emails = self.provider.fetch_folder_messages(folder_id, 10).await?;
-        let mut inserted = 0;
+    /// Fetch and insert messages for a single folder.
+    /// is_initial=true: paginate all messages; false: fetch 50 most recent only.
+    async fn sync_folder_messages(&self, folder_id: &str, is_initial: bool) -> Result<usize> {
+        if is_initial {
+            debug!("Full paginated sync for folder: {}", folder_id);
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<crate::models::EmailMessage>>(4);
 
-        for email in emails {
-            match self.db.email_exists(&email.id) {
-                Ok(false) => {
-                    self.db.insert_email(&email)?;
-                    inserted += 1;
-                    debug!("Inserted email: {} from {}", email.subject, email.from);
+            let provider = Arc::clone(&self.provider);
+            let folder_id_owned = folder_id.to_string();
+
+            // Spawn the paginator so it runs concurrently with DB writes
+            let fetch_handle = tokio::spawn(async move {
+                provider.fetch_all_folder_messages(&folder_id_owned, tx).await
+            });
+
+            let db = Arc::clone(&self.db);
+            let mut inserted = 0usize;
+
+            // Consume and persist each batch as it arrives
+            while let Some(batch) = rx.recv().await {
+                for email in &batch {
+                    match db.email_exists(&email.id) {
+                        Ok(false) => {
+                            if let Err(e) = db.insert_email(email) {
+                                error!("Failed to insert email {}: {}", email.id, e);
+                            } else {
+                                inserted += 1;
+                            }
+                        }
+                        Ok(true) => {}
+                        Err(e) => error!("DB existence check failed: {}", e),
+                    }
                 }
-                Ok(true) => {
-                    debug!("Email already exists, skipping: {}", email.id);
-                }
-                Err(e) => {
-                    error!("Failed to check email existence: {}", e);
+                debug!("Wrote batch of {} to DB (folder {})", batch.len(), folder_id);
+                tokio::task::yield_now().await;
+            }
+
+            if let Ok(Err(e)) = fetch_handle.await {
+                error!("Paginated fetch error for {}: {}", folder_id, e);
+            }
+
+            Ok(inserted)
+        } else {
+            // Incremental: 50 most recent
+            debug!("Incremental sync for folder: {}", folder_id);
+            let emails = self.provider.fetch_folder_messages(folder_id, 50).await?;
+            let mut inserted = 0;
+            for email in emails {
+                match self.db.email_exists(&email.id) {
+                    Ok(false) => {
+                        self.db.insert_email(&email)?;
+                        inserted += 1;
+                        debug!("Inserted email: {} from {}", email.subject, email.from);
+                    }
+                    Ok(true) => {}
+                    Err(e) => error!("Failed to check email existence: {}", e),
                 }
             }
+            Ok(inserted)
         }
-
-        Ok(inserted)
     }
 }
 
 /// Trigger an immediate email sync (used by HTTP trigger)
 pub async fn trigger_sync(daemon: &EmailDaemon) {
-    match daemon.sync_messages().await {
+    match daemon.sync_messages(false).await {
         Ok(count) => {
             info!("Triggered sync: stored {} new emails", count);
         }

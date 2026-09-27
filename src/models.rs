@@ -141,7 +141,12 @@ pub struct UiSettings {
     pub window_height: i32,
     pub use_tui_style: bool,
     pub animation_enabled: bool,
+    /// Whether the left nav sidebar is expanded (persisted across launches)
+    #[serde(default = "default_true")]
+    pub sidebar_expanded: bool,
 }
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SyncSettings {
@@ -176,6 +181,7 @@ impl Default for Settings {
                 window_height: 800,
                 use_tui_style: true,
                 animation_enabled: true,
+                sidebar_expanded: true,
             },
             sync: SyncSettings {
                 poll_interval_secs: 120, // 2 minute polling interval for email daemon

@@ -46,6 +46,24 @@ impl GraphEmailProvider {
             .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
         Ok(text)
     }
+
+    /// Parse a Graph API message JSON value into an EmailMessage
+    fn parse_message(msg: &serde_json::Value) -> EmailMessage {
+        let id = msg["id"].as_str().unwrap_or("").to_string();
+        let subject = msg["subject"].as_str().unwrap_or("(no subject)").to_string();
+        let received = msg["receivedDateTime"]
+            .as_str()
+            .unwrap_or(&chrono::Utc::now().to_rfc3339())
+            .to_string();
+        let from = msg["from"]["emailAddress"]["address"]
+            .as_str()
+            .unwrap_or("unknown@example.com")
+            .to_string();
+        let preview = msg["bodyPreview"].as_str().unwrap_or("").to_string();
+        let parent_folder_id = msg["parentFolderId"].as_str().map(|s| s.to_string());
+
+        EmailMessage { id, from, subject, received, body: preview, folder_id: parent_folder_id }
+    }
 }
 
 #[async_trait]
@@ -81,32 +99,73 @@ impl super::EmailProvider for GraphEmailProvider {
         let mut emails = Vec::new();
         if let Some(values) = json["value"].as_array() {
             for msg in values {
-                let id = msg["id"].as_str().unwrap_or("").to_string();
-                let subject = msg["subject"].as_str().unwrap_or("(no subject)").to_string();
-                let received = msg["receivedDateTime"]
-                    .as_str()
-                    .unwrap_or(&chrono::Utc::now().to_rfc3339())
-                    .to_string();
-                let from = msg["from"]["emailAddress"]["address"]
-                    .as_str()
-                    .unwrap_or("unknown@example.com")
-                    .to_string();
-                let preview = msg["bodyPreview"].as_str().unwrap_or("").to_string();
-                let parent_folder_id = msg["parentFolderId"].as_str().map(|s| s.to_string());
-
-                emails.push(EmailMessage {
-                    id,
-                    from,
-                    subject,
-                    received,
-                    body: preview,
-                    folder_id: parent_folder_id,
-                });
+                emails.push(Self::parse_message(msg));
             }
         }
 
         debug!("Fetched {} emails from folder {}", emails.len(), folder_id);
         Ok(emails)
+    }
+
+    /// Fetch ALL messages in a folder, following pagination via @odata.nextLink.
+    /// Returns results in batches via a channel so callers can process incrementally
+    /// without blocking. Each page is ~50 items.
+    async fn fetch_all_folder_messages(
+        &self,
+        folder_id: &str,
+        tx: tokio::sync::mpsc::Sender<Vec<EmailMessage>>,
+    ) -> Result<usize> {
+        let token = self.get_token().await?;
+        let client = reqwest::Client::new();
+
+        let mut next_url = Some(format!(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/{}/messages?\
+             $top=50&$select=id,subject,from,receivedDateTime,bodyPreview,isRead,parentFolderId\
+             &$orderby=receivedDateTime desc",
+            folder_id
+        ));
+
+        let mut total = 0usize;
+
+        while let Some(url) = next_url.take() {
+            let response = client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .send()
+                .await
+                .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+
+            let body = Self::check_response(response).await?;
+            let json: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+
+            let mut batch = Vec::new();
+            if let Some(values) = json["value"].as_array() {
+                for msg in values {
+                    batch.push(Self::parse_message(msg));
+                }
+            }
+
+            total += batch.len();
+            debug!("Fetched page of {} messages from folder {} (total so far: {})", batch.len(), folder_id, total);
+
+            if !batch.is_empty() {
+                // Send batch to caller — if receiver is gone, stop pagination
+                if tx.send(batch).await.is_err() {
+                    debug!("Pagination receiver dropped, stopping for folder {}", folder_id);
+                    break;
+                }
+            }
+
+            // Follow next page link if present
+            next_url = json["@odata.nextLink"].as_str().map(|s| s.to_string());
+
+            // Yield to Tokio scheduler between pages so UI stays responsive
+            tokio::task::yield_now().await;
+        }
+
+        debug!("Completed full sync of folder {}: {} messages total", folder_id, total);
+        Ok(total)
     }
 
     /// Fetch all mail folders from Graph API
