@@ -66,7 +66,7 @@ Window {
         var configDir = typeof Qt.application.environment !== "undefined"
             ? Qt.application.environment("CONFIG_DIR")
             : ""
-        if (configDir === "") configDir = "/home/adam/.config/omarchy-look"
+        if (configDir === "") configDir = "/home/adam/.config/omarchylook"
 
         var authStateFile = configDir + "/auth_state.json"
         var xhr = new XMLHttpRequest()
@@ -1089,7 +1089,7 @@ Window {
             var configDir = typeof Qt.application.environment !== "undefined"
                 ? Qt.application.environment("CONFIG_DIR")
                 : ""
-            if (configDir === "") configDir = "/home/adam/.config/omarchy-look"
+            if (configDir === "") configDir = "/home/adam/.config/omarchylook"
 
             var xhr = new XMLHttpRequest()
             xhr.onreadystatechange = function() {
@@ -1125,7 +1125,7 @@ Window {
             var configDir = typeof Qt.application.environment !== "undefined"
                 ? Qt.application.environment("CONFIG_DIR")
                 : ""
-            if (configDir === "") configDir = "/home/adam/.config/omarchy-look"
+            if (configDir === "") configDir = "/home/adam/.config/omarchylook"
 
             var xhr = new XMLHttpRequest()
             xhr.onreadystatechange = function() {

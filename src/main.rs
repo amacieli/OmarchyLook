@@ -42,13 +42,13 @@ fn main() {
 }
 
 fn get_config_dir() -> PathBuf {
-    // Use XDG standard: ~/.config/omarchy-look
+    // Use XDG standard: ~/.config/omarchylook
     if let Ok(xdg_config) = env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(xdg_config).join("omarchy-look")
+        PathBuf::from(xdg_config).join("omarchylook")
     } else if let Ok(home) = env::var("HOME") {
-        PathBuf::from(home).join(".config").join("omarchy-look")
+        PathBuf::from(home).join(".config").join("omarchylook")
     } else {
-        PathBuf::from("/tmp/omarchy-look")
+        PathBuf::from("/tmp/omarchylook")
     }
 }
 
