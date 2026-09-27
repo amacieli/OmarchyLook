@@ -99,18 +99,6 @@ impl EmailDaemon {
                         }
                     }
 
-                    // One-shot backfill: runs only on the first authenticated run,
-                    // and only if there are messages with folder_id IS NULL.
-                    // Spawned as a separate task so it doesn't block the sync loop.
-                    if is_first_run {
-                        // Re-borrow via Arc isn't available here; run inline but yield frequently
-                        // (fetch_message_folder_map yields between pages; backfill_folder_ids yields every 500)
-                        info!("First authenticated run — checking if folder_id backfill is needed");
-                        if let Err(e) = self.backfill_folder_ids().await {
-                            error!("Backfill failed: {}", e);
-                        }
-                    }
-
                     // Sync messages: on first authenticated run, or when interval elapsed
                     let should_sync_messages = is_first_run || last_message_sync
                         .map(|t| t.elapsed() >= message_interval)
@@ -146,46 +134,6 @@ impl EmailDaemon {
                 }
             }
         }
-    }
-
-    /// One-shot backfill: fetch (id, parentFolderId) for all messages in every folder,
-    /// then bulk-UPDATE any rows in the DB that still have folder_id IS NULL.
-    /// Runs once on the first authenticated launch; skipped if all rows already filled.
-    async fn backfill_folder_ids(&self) -> Result<()> {
-        let unfilled = self.db.count_unfilled_folder_ids().unwrap_or(0);
-        if unfilled == 0 {
-            debug!("Backfill: all rows already have folder_id — skipping");
-            return Ok(());
-        }
-        info!("Backfill: {} messages missing folder_id — starting one-shot backfill", unfilled);
-
-        let folders = self.db.get_folders()?;
-        if folders.is_empty() {
-            info!("Backfill: no folders cached yet — will retry after folder sync");
-            return Ok(());
-        }
-
-        let mut total_updated = 0usize;
-        for folder in &folders {
-            debug!("Backfill: fetching id map for folder '{}'", folder.display_name);
-            match self.provider.fetch_message_folder_map(&folder.id).await {
-                Ok(pairs) => {
-                    // Write in chunks of 500 so we yield between DB bursts
-                    for chunk in pairs.chunks(500) {
-                        match self.db.backfill_folder_ids(chunk) {
-                            Ok(n) => total_updated += n,
-                            Err(e) => error!("Backfill DB write error: {}", e),
-                        }
-                        tokio::task::yield_now().await;
-                    }
-                    debug!("Backfill: folder '{}' done", folder.display_name);
-                }
-                Err(e) => error!("Backfill: failed to fetch id map for '{}': {}", folder.display_name, e),
-            }
-        }
-
-        info!("Backfill complete: updated {} rows with folder_id", total_updated);
-        Ok(())
     }
 
     /// Fetch and upsert all top-level folders

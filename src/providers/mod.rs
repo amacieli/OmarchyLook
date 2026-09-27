@@ -34,14 +34,6 @@ pub trait EmailProvider: Send + Sync {
     /// Fetch all top-level mail folders
     async fn fetch_folders(&self) -> Result<Vec<MailFolder>>;
 
-    /// Fetch a minimal (id, parentFolderId) map for ALL messages in a folder.
-    /// Used for one-shot backfill of folder_id on existing DB rows.
-    /// Returns vec of (message_id, folder_id) pairs.
-    async fn fetch_message_folder_map(
-        &self,
-        folder_id: &str,
-    ) -> Result<Vec<(String, String)>>;
-
     /// Check if the token is still valid
     async fn is_token_valid(&self) -> Result<bool>;
 }
