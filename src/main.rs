@@ -291,19 +291,6 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     let db_path = config_dir.join("messages.db");
                     let body = match rusqlite::Connection::open(&db_path) {
                         Ok(conn) => {
-                            let (sql, has_folder) = match &folder_id {
-                                Some(_) => (
-                                    "SELECT id, subject, from_email, from_name, received_at, is_read \
-                                     FROM messages WHERE folder_id = ?1 ORDER BY received_at DESC LIMIT 50",
-                                    true,
-                                ),
-                                None => (
-                                    "SELECT id, subject, from_email, from_name, received_at, is_read \
-                                     FROM messages ORDER BY received_at DESC LIMIT 50",
-                                    false,
-                                ),
-                            };
-                            let mut stmt = conn.prepare(sql).unwrap();
                             let map_row = |row: &rusqlite::Row| {
                                 let id: String = row.get(0)?;
                                 let subject: String = row.get(1)?;
@@ -321,12 +308,38 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                                     is_read
                                 ))
                             };
-                            let rows: Vec<String> = if has_folder {
-                                stmt.query_map([folder_id.as_deref().unwrap_or("")], map_row)
+
+                            let rows: Vec<String> = if let Some(ref fid) = folder_id {
+                                // Try folder-filtered first; fall back to unfiltered if nothing found
+                                // (covers existing messages whose folder_id was not yet backfilled)
+                                let mut stmt = conn.prepare(
+                                    "SELECT id, subject, from_email, from_name, received_at, is_read \
+                                     FROM messages WHERE folder_id = ?1 ORDER BY received_at DESC LIMIT 50"
+                                ).unwrap();
+                                let filtered: Vec<String> = stmt
+                                    .query_map([fid.as_str()], map_row)
                                     .unwrap()
                                     .filter_map(|r| r.ok())
-                                    .collect()
+                                    .collect();
+
+                                if filtered.is_empty() {
+                                    // No folder_id matches — show all (pre-backfill state)
+                                    let mut stmt2 = conn.prepare(
+                                        "SELECT id, subject, from_email, from_name, received_at, is_read \
+                                         FROM messages ORDER BY received_at DESC LIMIT 50"
+                                    ).unwrap();
+                                    stmt2.query_map([], map_row)
+                                        .unwrap()
+                                        .filter_map(|r| r.ok())
+                                        .collect()
+                                } else {
+                                    filtered
+                                }
                             } else {
+                                let mut stmt = conn.prepare(
+                                    "SELECT id, subject, from_email, from_name, received_at, is_read \
+                                     FROM messages ORDER BY received_at DESC LIMIT 50"
+                                ).unwrap();
                                 stmt.query_map([], map_row)
                                     .unwrap()
                                     .filter_map(|r| r.ok())

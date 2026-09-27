@@ -285,8 +285,8 @@ impl Database {
         debug!("Inserting email: {}", email.id);
 
         self.conn.execute(
-            "INSERT OR IGNORE INTO messages (id, subject, from_email, body, received_at, is_read, cached_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR IGNORE INTO messages (id, subject, from_email, body, received_at, is_read, cached_at, folder_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 email.id,
                 email.subject,
@@ -295,6 +295,7 @@ impl Database {
                 email.received,
                 false, // new emails default to unread
                 now,
+                email.folder_id,
             ],
         )?;
 
