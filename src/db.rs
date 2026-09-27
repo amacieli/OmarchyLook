@@ -396,4 +396,29 @@ impl Database {
 
         Ok(messages)
     }
+
+    /// Bulk-update folder_id for a batch of (message_id, folder_id) pairs.
+    /// Only updates rows where folder_id IS NULL — safe to call multiple times.
+    /// Returns number of rows actually updated.
+    pub fn backfill_folder_ids(&self, pairs: &[(String, String)]) -> Result<usize> {
+        let mut updated = 0usize;
+        for (msg_id, folder_id) in pairs {
+            let n = self.conn.execute(
+                "UPDATE messages SET folder_id = ?1 WHERE id = ?2 AND folder_id IS NULL",
+                params![folder_id, msg_id],
+            )?;
+            updated += n;
+        }
+        Ok(updated)
+    }
+
+    /// Count messages with no folder_id set (for backfill progress checks).
+    pub fn count_unfilled_folder_ids(&self) -> Result<usize> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE folder_id IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(n as usize)
+    }
 }

@@ -211,6 +211,58 @@ impl super::EmailProvider for GraphEmailProvider {
         Ok(folders)
     }
 
+    async fn fetch_message_folder_map(
+        &self,
+        folder_id: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let token = self.get_token().await?;
+        let client = reqwest::Client::new();
+        let mut pairs: Vec<(String, String)> = Vec::new();
+
+        // Minimal select: only id and parentFolderId — fastest possible payload
+        let mut url = format!(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/{}/messages\
+             ?$select=id,parentFolderId&$top=999",
+            folder_id
+        );
+
+        loop {
+            let resp = client
+                .get(&url)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+
+            let body = Self::check_response(resp).await?;
+            let json: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+
+            if let Some(values) = json["value"].as_array() {
+                for msg in values {
+                    let msg_id = msg["id"].as_str().unwrap_or("").to_string();
+                    // parentFolderId is the canonical folder this message lives in
+                    let fid = msg["parentFolderId"].as_str().unwrap_or(folder_id).to_string();
+                    if !msg_id.is_empty() {
+                        pairs.push((msg_id, fid));
+                    }
+                }
+            }
+
+            // Follow pagination
+            match json["@odata.nextLink"].as_str() {
+                Some(next) => {
+                    url = next.to_string();
+                    tokio::task::yield_now().await;
+                }
+                None => break,
+            }
+        }
+
+        debug!("fetch_message_folder_map: {} pairs for folder {}", pairs.len(), folder_id);
+        Ok(pairs)
+    }
+
     async fn is_token_valid(&self) -> Result<bool> {
         let mut auth = self.auth.lock().await;
         let token = auth.get_token().map_err(|_| {
