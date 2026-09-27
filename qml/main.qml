@@ -955,12 +955,12 @@ Window {
                             }
 
                             Component.onCompleted: loadMessages()
+                        }
 
-                            // Reload when selected folder changes
-                            Connections {
-                                target: root
-                                function onSelectedFolderIdChanged() { loadMessages() }
-                            }
+                        // Reload messages when folder selection changes
+                        Connections {
+                            target: root
+                            function onSelectedFolderIdChanged() { inboxLoader.loadMessages() }
                         }
                     }
                 }
