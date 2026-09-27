@@ -299,6 +299,14 @@ impl Database {
             ],
         )?;
 
+        // Backfill folder_id on existing rows that were inserted before the column existed
+        if email.folder_id.is_some() {
+            self.conn.execute(
+                "UPDATE messages SET folder_id = ?1 WHERE id = ?2 AND folder_id IS NULL",
+                params![email.folder_id, email.id],
+            )?;
+        }
+
         Ok(())
     }
 
