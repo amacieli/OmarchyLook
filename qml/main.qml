@@ -309,9 +309,16 @@ Window {
             } else if (root.focusPane === "folder") {
                 if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
                     root.folderIndex = Math.min(root.folderIndex + 1, folderModel.count - 1)
+                    // Immediately filter messages to this folder
+                    if (folderModel.count > 0) {
+                        root.selectedFolderId = folderModel.get(root.folderIndex).id
+                    }
                     event.accepted = true
                 } else if (event.key === Qt.Key_K || event.key === Qt.Key_Up) {
                     root.folderIndex = Math.max(root.folderIndex - 1, 0)
+                    if (folderModel.count > 0) {
+                        root.selectedFolderId = folderModel.get(root.folderIndex).id
+                    }
                     event.accepted = true
                 } else if (event.key === Qt.Key_L || event.key === Qt.Key_Return) {
                     // Select folder and move to messages
@@ -744,7 +751,15 @@ Window {
                             Layout.fillWidth: true
 
                             Text {
-                                text: "  Inbox"
+                                text: "  " + (folderModel.count > 0 && root.selectedFolderId !== ""
+                                    ? (function() {
+                                        for (var i = 0; i < folderModel.count; i++) {
+                                            if (folderModel.get(i).id === root.selectedFolderId)
+                                                return folderModel.get(i).display_name
+                                        }
+                                        return "Mail"
+                                      })()
+                                    : "Mail")
                                 font.family: root.monoFont
                                 font.pixelSize: 12
                                 color: root.focusPane === "msg" ? root.accentColor : "#555555"
