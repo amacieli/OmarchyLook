@@ -13,6 +13,31 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
+/// Percent-decode a URL query parameter value (e.g. %3D → =, %2F → /)
+fn url_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i+1..i+3]) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte as char);
+                    i += 3;
+                    continue;
+                }
+            }
+        } else if bytes[i] == b'+' {
+            out.push(' ');
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 fn main() {
     // Initialize logging
     init_logging();
@@ -281,10 +306,11 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     let folder_id: Option<String> = first_line
                         .split_once("folder_id=")
                         .map(|(_, rest)| {
-                            rest.split(|c| c == ' ' || c == '&' || c == '\r' || c == '\n')
+                            let raw = rest.split(|c| c == ' ' || c == '&' || c == '\r' || c == '\n')
                                 .next()
-                                .unwrap_or("")
-                                .to_string()
+                                .unwrap_or("");
+                            // URL-decode: folder IDs contain = and / which QML encodeURIComponent encodes
+                            url_decode(raw)
                         })
                         .filter(|s| !s.is_empty());
 
