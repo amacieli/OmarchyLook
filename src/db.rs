@@ -1,7 +1,7 @@
 //! SQLite database with FTS5 for local mail cache
 
 use crate::errors::{OmarchyError, Result};
-use crate::models::{CachedMessage, EmailMessage, MailFolder, Message};
+use crate::models::{CachedMessage, CalendarEvent, EmailMessage, MailFolder, Message};
 use log::{debug, info};
 use rusqlite::{Connection, params, OptionalExtension};
 use chrono::Utc;
@@ -113,6 +113,25 @@ impl Database {
                 [],
             )?;
         }
+
+        // Calendar events (separate from mail; created if not present)
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS calendar_events (
+                id TEXT PRIMARY KEY,
+                subject TEXT NOT NULL,
+                body TEXT NOT NULL DEFAULT '',
+                start_at TEXT NOT NULL,
+                end_at TEXT NOT NULL,
+                is_all_day BOOLEAN DEFAULT 0,
+                time_zone TEXT,
+                cached_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_at)",
+            [],
+        )?;
 
         Ok(())
     }
@@ -395,5 +414,87 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(messages)
+    }
+
+    // ------------------------------------------------------------ calendar
+
+    /// Insert or update a calendar event (updates so reschedules/edits propagate)
+    pub fn upsert_event(&self, ev: &CalendarEvent) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO calendar_events (id, subject, body, start_at, end_at, is_all_day, time_zone, cached_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET
+               subject    = excluded.subject,
+               body       = excluded.body,
+               start_at   = excluded.start_at,
+               end_at     = excluded.end_at,
+               is_all_day = excluded.is_all_day,
+               time_zone  = excluded.time_zone,
+               cached_at  = CURRENT_TIMESTAMP",
+            params![ev.id, ev.subject, ev.body, ev.start, ev.end, ev.is_all_day, ev.time_zone],
+        )?;
+        Ok(())
+    }
+
+    /// Events overlapping the given month ("YYYY-MM"), ordered by start
+    pub fn get_events_for_month(&self, month: &str) -> Result<Vec<CalendarEvent>> {
+        let (y, m) = month.split_once('-').unwrap_or(("1970", "01"));
+        let (y, m): (i32, u32) = (y.parse().unwrap_or(1970), m.parse().unwrap_or(1));
+        let (ny, nm) = if m >= 12 { (y + 1, 1) } else { (y, m + 1) };
+        let from = format!("{:04}-{:02}-01T00:00:00", y, m);
+        let to = format!("{:04}-{:02}-01T00:00:00", ny, nm);
+
+        let mut stmt = self.conn.prepare(
+            "SELECT id, subject, body, start_at, end_at, is_all_day, COALESCE(time_zone, '')
+             FROM calendar_events
+             WHERE start_at < ?2 AND end_at >= ?1
+             ORDER BY start_at ASC",
+        )?;
+        let events = stmt
+            .query_map(params![from, to], |row| {
+                Ok(CalendarEvent {
+                    id:         row.get(0)?,
+                    subject:    row.get(1)?,
+                    body:       row.get(2)?,
+                    start:      row.get(3)?,
+                    end:        row.get(4)?,
+                    is_all_day: row.get(5)?,
+                    time_zone:  row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(events)
+    }
+}
+
+#[cfg(test)]
+mod calendar_tests {
+    use super::*;
+
+    fn ev(id: &str, start: &str, end: &str, subject: &str) -> CalendarEvent {
+        CalendarEvent {
+            id: id.into(), subject: subject.into(), body: "body".into(),
+            start: start.into(), end: end.into(), is_all_day: false, time_zone: "America/New_York".into(),
+        }
+    }
+
+    #[test]
+    fn upsert_and_month_query() {
+        let db = Database::open(":memory:").unwrap();
+        db.upsert_event(&ev("a", "2026-10-03T09:00:00", "2026-10-03T10:00:00", "Standup")).unwrap();
+        db.upsert_event(&ev("b", "2026-09-30T23:00:00", "2026-10-01T01:00:00", "Spans in")).unwrap();
+        db.upsert_event(&ev("c", "2026-11-01T09:00:00", "2026-11-01T10:00:00", "Next month")).unwrap();
+        db.upsert_event(&ev("d", "2026-12-31T20:00:00", "2027-01-01T01:00:00", "Spans out")).unwrap();
+
+        let oct = db.get_events_for_month("2026-10").unwrap();
+        assert_eq!(oct.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
+        assert_eq!(db.get_events_for_month("2027-01").unwrap().len(), 1);
+        assert_eq!(db.get_events_for_month("2026-12").unwrap().len(), 1);
+
+        // upsert updates in place (reschedule)
+        db.upsert_event(&ev("a", "2026-10-04T09:00:00", "2026-10-04T10:00:00", "Standup moved")).unwrap();
+        let oct = db.get_events_for_month("2026-10").unwrap();
+        assert_eq!(oct.len(), 2);
+        assert!(oct.iter().any(|e| e.subject == "Standup moved" && e.start.starts_with("2026-10-04")));
     }
 }

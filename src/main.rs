@@ -201,6 +201,12 @@ fn initialize_app(config_dir: &PathBuf, db_path: &str, settings_path: &str) -> o
         start_email_daemon_thread(&config_dir_daemon);
     });
     
+    // Start calendar daemon (independent of the email daemon)
+    let config_dir_cal = config_dir.clone();
+    std::thread::spawn(move || {
+        start_calendar_daemon_thread(&config_dir_cal);
+    });
+    
     Ok(())
 }
 
@@ -306,6 +312,49 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                         }
                         Err(e) => {
                             warn!("GET /folders: DB open failed: {}", e);
+                            "[]".to_string()
+                        }
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── GET /calendar/events?month=YYYY-MM — cached calendar events ──
+                if first_line.contains("GET /calendar/events") {
+                    let month: String = first_line
+                        .split_once("month=")
+                        .map(|(_, rest)| {
+                            rest.split(|c| c == ' ' || c == '&' || c == '\r' || c == '\n')
+                                .next()
+                                .unwrap_or("")
+                                .to_string()
+                        })
+                        .unwrap_or_default();
+
+                    let body = match Database::open(config_dir.join("messages.db").to_str().unwrap_or("messages.db")) {
+                        Ok(db) => match db.get_events_for_month(&month) {
+                            Ok(events) => serde_json::to_string(
+                                &events.iter().map(|e| serde_json::json!({
+                                    "id": e.id,
+                                    "subject": e.subject,
+                                    "body": e.body,
+                                    "start": e.start,
+                                    "end": e.end,
+                                    "is_all_day": e.is_all_day,
+                                    "time_zone": e.time_zone,
+                                })).collect::<Vec<_>>()
+                            ).unwrap_or_else(|_| "[]".to_string()),
+                            Err(e) => {
+                                warn!("GET /calendar/events: query failed: {}", e);
+                                "[]".to_string()
+                            }
+                        },
+                        Err(e) => {
+                            warn!("GET /calendar/events: DB open failed: {}", e);
                             "[]".to_string()
                         }
                     };
@@ -552,6 +601,40 @@ fn start_email_daemon_thread(config_dir: &PathBuf) {
         let daemon = EmailDaemon::new(daemon_config, daemon_db, provider);
         
         // Run the daemon (this will loop indefinitely)
+        daemon.start().await;
+    });
+}
+
+/// Start the calendar daemon with its own tokio runtime (separate from mail)
+fn start_calendar_daemon_thread(config_dir: &PathBuf) {
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to create tokio runtime for calendar daemon: {}", e);
+            return;
+        }
+    };
+
+    info!("Calendar daemon thread starting...");
+
+    rt.block_on(async {
+        let auth = AuthManager::new();
+        let provider = Arc::new(omarchylook::providers::GraphCalendarProvider::new(auth));
+
+        let db_path = config_dir.join("messages.db");
+        let db = match Database::open(db_path.to_str().unwrap_or("messages.db")) {
+            Ok(db) => Arc::new(db),
+            Err(e) => {
+                error!("Failed to open database for calendar daemon: {}", e);
+                return;
+            }
+        };
+
+        let daemon = omarchylook::calendar_daemon::CalendarDaemon::new(
+            omarchylook::calendar_daemon::CalendarDaemonConfig::default(),
+            db,
+            provider,
+        );
         daemon.start().await;
     });
 }

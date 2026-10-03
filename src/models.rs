@@ -87,6 +87,19 @@ pub struct EmailMessage {
     pub folder_id: Option<String>,
 }
 
+/// Calendar event for daemon storage (start/end are local wall-clock
+/// "YYYY-MM-DDTHH:MM:SS" strings in `time_zone`)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CalendarEvent {
+    pub id: String,
+    pub subject: String,
+    pub body: String,
+    pub start: String,
+    pub end: String,
+    pub is_all_day: bool,
+    pub time_zone: String,
+}
+
 /// Cached mail entry in SQLite
 #[derive(Debug, Clone)]
 pub struct CachedMessage {

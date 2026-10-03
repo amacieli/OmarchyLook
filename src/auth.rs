@@ -11,7 +11,7 @@ use std::time::{SystemTime, Duration};
 const PUBLIC_CLIENT_ID: &str = "9c277d6f-edb2-4f82-bda5-901b4c11c457";
 // const TENANT_ID: &str = "common";  // Unused; part of OAuth spec but not needed for public client flow
 // Explicit Graph scopes — NOT .default. These map to the delegated permissions on the app registration.
-const GRAPH_SCOPE: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/User.Read offline_access";
+const GRAPH_SCOPE: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.Read https://graph.microsoft.com/User.Read offline_access";
 const DEVICE_AUTH_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
 

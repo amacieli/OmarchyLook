@@ -40,3 +40,6 @@ pub trait EmailProvider: Send + Sync {
 
 pub mod graph;
 pub use graph::GraphEmailProvider;
+
+pub mod calendar;
+pub use calendar::{CalendarProvider, GraphCalendarProvider};
