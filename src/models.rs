@@ -109,6 +109,8 @@ pub struct Account {
     pub display_name: Option<String>,
     /// Non-secret provider settings as JSON (e.g. IMAP host/port). Secrets live in the keyring.
     pub config: String,
+    /// False after "Log out": sync is stopped but tokens and cached data are kept.
+    pub enabled: bool,
 }
 
 /// Cached mail entry in SQLite

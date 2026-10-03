@@ -15,6 +15,7 @@ RowLayout {
   required property var app
 
   signal loginRequested(string provider)
+  signal accountLoginRequested(string accountId, string provider)
   signal logoutRequested(string accountId)
   signal removeRequested(string accountId)
 
@@ -92,6 +93,7 @@ RowLayout {
       accounts: root.app.accounts
       isAuthenticated: root.app.auth.isAuthenticated
       onLoginRequested: function(provider) { root.loginRequested(provider) }
+      onAccountLoginRequested: function(accountId, provider) { root.accountLoginRequested(accountId, provider) }
       onLogoutRequested: function(accountId) { root.logoutRequested(accountId) }
       onRemoveRequested: function(accountId) { root.removeRequested(accountId) }
     }

@@ -176,6 +176,15 @@ impl Database {
             [],
         )?;
 
+        let has_enabled: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('accounts') WHERE name='enabled'",
+            [],
+            |row| row.get::<_, i32>(0),
+        ).unwrap_or(0) > 0;
+        if !has_enabled {
+            self.conn.execute("ALTER TABLE accounts ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1", [])?;
+        }
+
         let mut backfill_needed = false;
         for table in ["messages", "folders", "calendar_events"] {
             let has_col: bool = self.conn.query_row(
@@ -254,6 +263,7 @@ impl Database {
             id: id.to_string(), provider: provider.to_string(),
             email: email.map(|s| s.to_string()), display_name: display_name.map(|s| s.to_string()),
             config: config.to_string(),
+            enabled: true,
         })
     }
 
@@ -283,6 +293,7 @@ impl Database {
                     email: email.map(|s| s.to_string()),
                     display_name: display_name.map(|s| s.to_string()),
                     config: config.to_string(),
+                    enabled: true,
                 });
             }
         }
@@ -291,17 +302,23 @@ impl Database {
 
     pub fn list_accounts(&self) -> Result<Vec<Account>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, provider, email, display_name, config FROM accounts ORDER BY created_at, id",
+            "SELECT id, provider, email, display_name, config, enabled FROM accounts ORDER BY created_at, id",
         )?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(Account {
                     id: row.get(0)?, provider: row.get(1)?, email: row.get(2)?,
-                    display_name: row.get(3)?, config: row.get(4)?,
+                    display_name: row.get(3)?, config: row.get(4)?, enabled: row.get(5)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Log out (false) / log in (true): toggles syncing without touching tokens or data.
+    pub fn set_account_enabled(&self, account_id: &str, enabled: bool) -> Result<()> {
+        self.conn.execute("UPDATE accounts SET enabled = ?1 WHERE id = ?2", params![enabled, account_id])?;
+        Ok(())
     }
 
     pub fn set_account_email(&self, account_id: &str, email: &str) -> Result<()> {
@@ -721,6 +738,31 @@ mod account_tests {
         assert!(db.create_account("gmail", Some("me@gmail.com"), None, "{}").is_err());
         // same address on another provider type is a different account
         assert!(db.create_account("outlook", Some("me@gmail.com"), None, "{}").is_ok());
+    }
+
+    #[test]
+    fn accounts_start_enabled_and_can_be_toggled() {
+        let db = Database::open(":memory:").unwrap();
+        let a = db.create_account("exchange", Some("a@x.com"), None, "{}").unwrap();
+        assert!(a.enabled);
+        db.set_account_enabled(&a.id, false).unwrap();
+        assert!(!db.list_accounts().unwrap()[0].enabled);
+        db.set_account_enabled(&a.id, true).unwrap();
+        assert!(db.list_accounts().unwrap()[0].enabled);
+    }
+
+    #[test]
+    fn enabled_column_is_added_to_an_existing_accounts_table() {
+        let path = temp_db_path("enabled-col");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch("CREATE TABLE accounts (id TEXT PRIMARY KEY, provider TEXT NOT NULL, email TEXT, display_name TEXT,
+                config TEXT NOT NULL DEFAULT '{}', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE(provider, email));
+                INSERT INTO accounts (id, provider, email) VALUES ('exchange-aaaaaa','exchange','a@x.com');").unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        assert!(db.list_accounts().unwrap()[0].enabled, "existing accounts stay signed in");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

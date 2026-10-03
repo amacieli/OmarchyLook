@@ -348,6 +348,31 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     continue;
                 }
 
+                // ── POST /accounts/login?account=ID — log in an existing account ──
+                // Reuses the kept token when there is one; otherwise tells the UI to run a device flow.
+                if first_line.contains("POST /accounts/login") {
+                    let id = query_param(first_line, "account").unwrap_or_default();
+                    let body = match SCHEDULER.get() {
+                        Some(scheduler) => match omarchylook::account_ops::log_in_existing(config_dir, &id, scheduler) {
+                            Ok(omarchylook::account_ops::ResumeOutcome::Resumed) => "{\"result\":\"resumed\"}".to_string(),
+                            Ok(omarchylook::account_ops::ResumeOutcome::LoginRequired(provider)) => {
+                                serde_json::json!({ "result": "login_required", "provider": provider }).to_string()
+                            }
+                            Err(e) => {
+                                error!("❌ log in {} failed: {}", id, e);
+                                "{\"result\":\"error\"}".to_string()
+                            }
+                        },
+                        None => "{\"result\":\"error\"}".to_string(),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
                 // ── GET /calendar/events?month=YYYY-MM — cached calendar events ──
                 if first_line.contains("GET /calendar/events") {
                     let month: String = first_line

@@ -68,8 +68,10 @@ pub fn accounts_json(config_dir: &Path) -> String {
     let rows: Vec<serde_json::Value> = accounts
         .iter()
         .map(|a| {
-            let signed_in = broker_for(&a.id).is_authenticated();
-            if signed_in && a.email.as_deref().unwrap_or("").is_empty() {
+            let has_token = broker_for(&a.id).is_authenticated();
+            // Signed in = not logged out AND credentials present. A logged-out account keeps its token.
+            let signed_in = a.enabled && has_token;
+            if has_token && a.email.as_deref().unwrap_or("").is_empty() {
                 resolve_email_in_background(config_dir, &a.id);
             }
             serde_json::json!({
@@ -129,7 +131,7 @@ pub fn register_login(
                 && a.email.as_deref().map(|e| e.eq_ignore_ascii_case(email)).unwrap_or(false)
         });
         if let Some(existing) = existing {
-            if is_signed_in(&existing.id) {
+            if existing.enabled && is_signed_in(&existing.id) {
                 return Ok(LoginOutcome::Duplicate(email.to_string()));
             }
             move_tokens(id, &existing.id)?;
@@ -178,6 +180,7 @@ fn finish_login(config_dir: &Path, id: &str, provider: &str, scheduler: &SyncSch
     };
     match register_login(&db, id, provider, email.as_deref(), &|a| broker_for(a).is_authenticated(), &move_tokens) {
         Ok(LoginOutcome::Added(id)) | Ok(LoginOutcome::Rebound(id)) => {
+            let _ = db.set_account_enabled(&id, true);
             scheduler.start_account(&id);
             write_auth_state(config_dir, None, Some(now_serial()));
         }
@@ -195,20 +198,48 @@ fn finish_login(config_dir: &Path, id: &str, provider: &str, scheduler: &SyncSch
 
 // ───────────────────────────────────────────────── sign out / remove
 
-/// Stop syncing and delete the account's tokens. The account and its cached data stay
-/// (shown as signed out) so signing in again to the same mailbox resumes without a re-sync.
+/// Log out: stop syncing and mark the account signed out. The token stays in the keyring
+/// and the cached data stays in the database, so `log_in_existing` can resume instantly.
+/// Only `remove_account` deletes the keyring entry.
 pub fn sign_out_account(config_dir: &Path, id: &str, scheduler: &SyncScheduler) -> Result<()> {
     scheduler.stop_account(id);
-    broker_for(id).sign_out()?;
+    Database::open(&db_path(config_dir))?.set_account_enabled(id, false)?;
     write_auth_state(config_dir, None, Some(now_serial()));
     Ok(())
 }
 
-/// Sign out every signed-in account (what the legacy logout trigger file means).
+#[derive(Debug, PartialEq)]
+pub enum ResumeOutcome {
+    /// Stored credentials were reused; sync restarted.
+    Resumed,
+    /// No usable credentials; the caller must run a device-flow login.
+    LoginRequired(String),
+}
+
+/// Log in to an existing account. Reuses the stored token when there is one (no network
+/// call here: if the grant turned out to be dead, the sync daemon's refresh clears it and
+/// the next "Log in" falls through to a device flow).
+pub fn log_in_existing(config_dir: &Path, id: &str, scheduler: &SyncScheduler) -> Result<ResumeOutcome> {
+    let db = Database::open(&db_path(config_dir))?;
+    let account = db
+        .list_accounts()?
+        .into_iter()
+        .find(|a| a.id == id)
+        .ok_or_else(|| OmarchyError::SettingsError(format!("unknown account {}", id)))?;
+    if !broker_for(id).is_authenticated() {
+        return Ok(ResumeOutcome::LoginRequired(account.provider));
+    }
+    db.set_account_enabled(id, true)?;
+    scheduler.start_account(id);
+    write_auth_state(config_dir, None, Some(now_serial()));
+    Ok(ResumeOutcome::Resumed)
+}
+
+/// Log out every signed-in account (what the legacy logout trigger file means).
 pub fn sign_out_all(config_dir: &Path, scheduler: &SyncScheduler) -> Result<usize> {
     let accounts = Database::open(&db_path(config_dir))?.list_accounts()?;
     let mut n = 0;
-    for a in accounts.iter().filter(|a| broker_for(&a.id).is_authenticated()) {
+    for a in accounts.iter().filter(|a| a.enabled) {
         sign_out_account(config_dir, &a.id, scheduler)?;
         n += 1;
     }
@@ -216,7 +247,7 @@ pub fn sign_out_all(config_dir: &Path, scheduler: &SyncScheduler) -> Result<usiz
     Ok(n)
 }
 
-/// Sign out and delete the account together with everything cached for it.
+/// Remove the account: delete its keyring entry and everything cached for it.
 pub fn remove_account(config_dir: &Path, id: &str, scheduler: &SyncScheduler) -> Result<()> {
     scheduler.stop_account(id);
     broker_for(id).sign_out()?;
@@ -272,6 +303,16 @@ mod tests {
         assert_eq!(out, LoginOutcome::Rebound("exchange-aaaaaa".into()));
         assert_eq!(moved.into_inner(), vec![("exchange-bbbbbb".to_string(), "exchange-aaaaaa".to_string())]);
         assert_eq!(d.list_accounts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn logged_out_account_with_a_kept_token_is_still_rebound_not_duplicate() {
+        let d = db();
+        register_login(&d, "exchange-aaaaaa", "exchange", Some("a@x.com"), &|_| true, &|_, _| Ok(())).unwrap();
+        d.set_account_enabled("exchange-aaaaaa", false).unwrap();
+        // token still present (is_signed_in true) but the account is logged out
+        let out = register_login(&d, "exchange-bbbbbb", "exchange", Some("a@x.com"), &|_| true, &|_, _| Ok(())).unwrap();
+        assert_eq!(out, LoginOutcome::Rebound("exchange-aaaaaa".into()));
     }
 
     #[test]

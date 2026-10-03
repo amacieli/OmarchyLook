@@ -57,7 +57,7 @@ impl SyncScheduler {
         match db.list_accounts() {
             Ok(accounts) => {
                 for a in accounts {
-                    if broker_for(&a.id).is_authenticated() {
+                    if a.enabled && broker_for(&a.id).is_authenticated() {
                         self.start_account(&a.id);
                     } else {
                         info!("Scheduler: account {} is signed out; not syncing", a.id);

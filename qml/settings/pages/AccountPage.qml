@@ -8,8 +8,9 @@ import ".."
 // Accounts: add a mail account of any provider, then manage every account below.
 // Exchange/Outlook (Microsoft) sign-in works, any number of them; the other
 // providers are listed so the flow is in place for them.
-// "Log out" keeps the account and its cached data (shown as signed out);
-// "Remove" deletes the account and its cached data.
+// "Log out" stops syncing but keeps the account, its token and its cached data
+// (shown as signed out; "Log in" resumes instantly). "Remove" deletes the account,
+// its keyring token and its cached data.
 SettingsPage {
   id: page
 
@@ -21,6 +22,7 @@ SettingsPage {
   property string notice: ""
 
   signal loginRequested(string provider)
+  signal accountLoginRequested(string accountId, string provider)
   signal logoutRequested(string accountId)
   signal removeRequested(string accountId)
 
@@ -130,14 +132,15 @@ SettingsPage {
             foreground: modelData.signed_in ? Color.accent : Color.foreground
             dim: !modelData.signed_in
           }
-          // Signed out → "Log in": a device-flow login; signing in to this same mailbox
-          // re-attaches it to this account (cached data kept, no re-sync).
+          // Signed out → "Log in": the kept token is reused (no sign-in prompt). Only if it is
+          // gone or was revoked does the backend ask for a device-flow login, and signing in to
+          // the same mailbox then re-attaches to this account (cached data kept, no re-sync).
           Button {
             bordered: true
             iconText: modelData.signed_in ? "\uf2f5" : "\uf090"
             text: modelData.signed_in ? "Log out" : "Log in"
             onClicked: modelData.signed_in ? page.logoutRequested(modelData.id)
-                                           : page.loginRequested(modelData.provider)
+                                           : page.accountLoginRequested(modelData.id, modelData.provider)
           }
           // Two-step remove: it deletes the cached mail/calendar data too.
           Button {

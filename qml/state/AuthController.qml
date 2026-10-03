@@ -40,12 +40,27 @@ Item {
     xhr.send()
   }
 
-  // Sign one account out (tokens removed, cached data kept).
+  // Log in an existing account: the backend reuses its kept token, or says a device
+  // flow is needed (then we run the normal login for that provider).
+  function loginAccount(accountId, provider) {
+    var xhr = new XMLHttpRequest()
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState !== XMLHttpRequest.DONE) return
+      var res = {}
+      try { res = JSON.parse(xhr.responseText) } catch (e) {}
+      if (res.result === "login_required") root.startLogin(res.provider || provider)
+      else root.accountsChanged()
+    }
+    xhr.open("POST", root.backendUrl + "/accounts/login?account=" + encodeURIComponent(accountId))
+    xhr.send()
+  }
+
+  // Log one account out (sync stops; its token and cached data are kept).
   function logout(accountId) {
     postAccountAction("/auth/logout", accountId)
   }
 
-  // Delete an account and everything cached for it.
+  // Delete an account: its keyring token and everything cached for it.
   function removeAccount(accountId) {
     postAccountAction("/accounts/remove", accountId)
   }

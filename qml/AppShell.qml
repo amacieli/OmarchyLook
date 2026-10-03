@@ -138,6 +138,7 @@ FocusScope {
       SettingsView {
         app: appState
         onLoginRequested: function(provider) { appState.auth.startLogin(provider) }
+        onAccountLoginRequested: function(accountId, provider) { appState.auth.loginAccount(accountId, provider) }
         onLogoutRequested: function(accountId) { appState.auth.logout(accountId) }
         onRemoveRequested: function(accountId) { appState.auth.removeAccount(accountId) }
       }
