@@ -10,6 +10,19 @@ use async_trait::async_trait;
 use log::{debug, error};
 use tokio::sync::Mutex;
 
+/// Pseudo folder id for the user's default Contacts folder. Graph does NOT list it under
+/// `/me/contactFolders` (that returns only the folders beneath it); its contacts are served
+/// from `/me/contacts`. Without this entry an address book with no extra folders syncs nothing.
+pub const DEFAULT_FOLDER_ID: &str = "contacts";
+
+fn folder_contacts_url(folder_id: &str) -> String {
+    if folder_id == DEFAULT_FOLDER_ID {
+        "https://graph.microsoft.com/v1.0/me/contacts".to_string()
+    } else {
+        format!("https://graph.microsoft.com/v1.0/me/contactFolders/{}/contacts", folder_id)
+    }
+}
+
 const SELECT: &str = "id,displayName,givenName,surname,companyName,jobTitle,emailAddresses,homePhones,\
                       businessPhones,mobilePhone,homeAddress,businessAddress,otherAddress,\
                       createdDateTime,lastModifiedDateTime,parentFolderId";
@@ -81,7 +94,11 @@ impl ContactsProvider for GraphContactsProvider {
         let token = self.get_token().await?;
         let client = reqwest::Client::new();
         let mut url = Some("https://graph.microsoft.com/v1.0/me/contactFolders?$top=100&$select=id,displayName,parentFolderId".to_string());
-        let mut folders = Vec::new();
+        let mut folders = vec![ContactFolder {
+            id: DEFAULT_FOLDER_ID.to_string(),
+            display_name: "Contacts".to_string(),
+            parent_folder_id: None,
+        }];
         while let Some(u) = url.take() {
             let json = Self::get_page(&client, &token, &u).await?;
             for f in json["value"].as_array().cloned().unwrap_or_default() {
@@ -101,8 +118,8 @@ impl ContactsProvider for GraphContactsProvider {
         let token = self.get_token().await?;
         let client = reqwest::Client::new();
         let url = format!(
-            "https://graph.microsoft.com/v1.0/me/contactFolders/{}/contacts?$top={}&$select={}&$orderby=lastModifiedDateTime desc",
-            folder_id, limit, SELECT
+            "{}?$top={}&$select={}&$orderby=lastModifiedDateTime desc",
+            folder_contacts_url(folder_id), limit, SELECT
         );
         let json = Self::get_page(&client, &token, &url).await?;
         Ok(parse_page(&json))
@@ -116,8 +133,8 @@ impl ContactsProvider for GraphContactsProvider {
         let token = self.get_token().await?;
         let client = reqwest::Client::new();
         let mut next_url = Some(format!(
-            "https://graph.microsoft.com/v1.0/me/contactFolders/{}/contacts?$top=50&$select={}&$orderby=lastModifiedDateTime desc",
-            folder_id, SELECT
+            "{}?$top=50&$select={}&$orderby=lastModifiedDateTime desc",
+            folder_contacts_url(folder_id), SELECT
         ));
         let mut total = 0usize;
         while let Some(url) = next_url.take() {
@@ -266,6 +283,27 @@ mod tests {
         assert_eq!(format_address(&json!({"state":"CA","postalCode":"94105"})), "CA 94105");
         assert_eq!(format_address(&json!({})), "");
         assert_eq!(format_address(&serde_json::Value::Null), "");
+    }
+
+    #[test]
+    fn default_folder_is_read_from_me_contacts_and_others_from_their_folder() {
+        assert_eq!(folder_contacts_url(DEFAULT_FOLDER_ID), "https://graph.microsoft.com/v1.0/me/contacts");
+        assert_eq!(
+            folder_contacts_url("AAMk=="),
+            "https://graph.microsoft.com/v1.0/me/contactFolders/AAMk==/contacts"
+        );
+    }
+
+    #[test]
+    fn graph_nulls_are_tolerated() {
+        // Real Graph returns null for unset jobTitle/companyName and empty address objects.
+        let c = parse_contact(&json!({
+            "id": "1", "displayName": "Rick", "givenName": "Rick", "surname": "H", "jobTitle": null, "companyName": null,
+            "homePhones": [], "businessPhones": [], "mobilePhone": null, "emailAddresses": [],
+            "homeAddress": {}, "businessAddress": {}, "otherAddress": {}
+        }));
+        assert_eq!((c.company.as_str(), c.job_title.as_str()), ("", ""));
+        assert!(c.phones.is_empty() && c.addresses.is_empty() && c.emails.is_empty());
     }
 
     #[test]
