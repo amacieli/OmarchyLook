@@ -100,6 +100,54 @@ pub struct CalendarEvent {
     pub time_zone: String,
 }
 
+/// Phone number with its type ("mobile", "home", "work")
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ContactPhone {
+    pub kind: String,
+    pub number: String,
+}
+
+/// Postal address, already flattened to one line ("street, city, state zip, country")
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ContactAddress {
+    pub kind: String,
+    pub text: String,
+}
+
+/// Contact for daemon storage
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+pub struct Contact {
+    pub id: String,
+    pub display_name: String,
+    pub given_name: String,
+    pub surname: String,
+    pub company: String,
+    pub job_title: String,
+    pub emails: Vec<String>,
+    pub phones: Vec<ContactPhone>,
+    pub addresses: Vec<ContactAddress>,
+    pub folder_id: Option<String>,
+    pub created_at: String,
+    pub modified_at: String,
+}
+
+/// A contact folder ("contact list" in the UI)
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ContactFolder {
+    pub id: String,
+    pub display_name: String,
+    pub parent_folder_id: Option<String>,
+}
+
+/// Contact plus the view-only fields the People view needs
+#[derive(Debug, Serialize, Clone)]
+pub struct ContactRow {
+    #[serde(flatten)]
+    pub contact: Contact,
+    pub folder_name: String,
+    pub is_favorite: bool,
+}
+
 /// A configured mail/calendar account (see `accounts.rs` for the id scheme)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Account {

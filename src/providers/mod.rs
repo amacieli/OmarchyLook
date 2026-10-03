@@ -43,3 +43,6 @@ pub use graph::GraphEmailProvider;
 
 pub mod calendar;
 pub use calendar::{CalendarProvider, GraphCalendarProvider};
+
+pub mod contacts;
+pub use contacts::{ContactsProvider, GraphContactsProvider};

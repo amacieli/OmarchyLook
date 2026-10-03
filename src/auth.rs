@@ -14,42 +14,75 @@ use std::time::{SystemTime, Duration};
 const PUBLIC_CLIENT_ID: &str = "9c277d6f-edb2-4f82-bda5-901b4c11c457";
 // const TENANT_ID: &str = "common";  // Unused; part of OAuth spec but not needed for public client flow
 // Explicit Graph scopes — NOT .default. These map to the delegated permissions on the app registration.
-const GRAPH_SCOPE: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.Read https://graph.microsoft.com/User.Read offline_access";
+const GRAPH_SCOPE: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.Read https://graph.microsoft.com/Contacts.Read https://graph.microsoft.com/User.Read offline_access";
+// Scopes every account is known to have consented to. A silent refresh falls back to this set
+// when the account has not yet consented to a newer scope (e.g. Contacts.Read), so mail and
+// calendar keep working instead of the whole login being thrown away.
+const GRAPH_SCOPE_BASE: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.Read https://graph.microsoft.com/User.Read offline_access";
 const DEVICE_AUTH_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
 
 /// Refreshes Microsoft tokens; classifies failures so the broker only wipes
 /// stored tokens when the grant is genuinely dead.
-struct MsRefresher;
+struct MsRefresher {
+    /// Set once this account was found not to have consented to the full scope set;
+    /// later refreshes then go straight to the base scopes (one instance per account).
+    full_scope_unavailable: std::sync::atomic::AtomicBool,
+}
 
-impl Refresher for MsRefresher {
-    fn refresh(&self, refresh_token: &str) -> RefreshOutcome {
+impl MsRefresher {
+    fn new() -> Self {
+        Self { full_scope_unavailable: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    /// One refresh attempt for `scope`. The bool is true when the failure only means a
+    /// requested scope hasn't been consented to yet (not that the login is dead).
+    fn attempt(refresh_token: &str, scope: &str) -> (RefreshOutcome, bool) {
         let params = [
             ("grant_type", "refresh_token"),
             ("client_id", PUBLIC_CLIENT_ID),
             ("refresh_token", refresh_token),
-            ("scope", GRAPH_SCOPE),
+            ("scope", scope),
         ];
         match ureq::post(TOKEN_URL).send_form(&params) {
             Ok(resp) => match resp.into_json::<TokenResponse>() {
-                Ok(t) => RefreshOutcome::Ok(t),
-                Err(e) => RefreshOutcome::Transient(format!("bad token response: {}", e)),
+                Ok(t) => (RefreshOutcome::Ok(t), false),
+                Err(e) => (RefreshOutcome::Transient(format!("bad token response: {}", e)), false),
             },
-            Err(ureq::Error::Status(code, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                let err = serde_json::from_str::<serde_json::Value>(&body)
-                    .ok()
-                    .and_then(|v| v["error"].as_str().map(|s| s.to_string()))
-                    .unwrap_or_default();
-                match err.as_str() {
-                    "invalid_grant" | "interaction_required" | "consent_required" => {
-                        RefreshOutcome::InvalidGrant(format!("{}: {}", code, err))
-                    }
-                    _ => RefreshOutcome::Transient(format!("HTTP {}: {}", code, body)),
-                }
-            }
-            Err(e) => RefreshOutcome::Transient(e.to_string()),
+            Err(ureq::Error::Status(code, resp)) => classify_refresh_error(code, &resp.into_string().unwrap_or_default()),
+            Err(e) => (RefreshOutcome::Transient(e.to_string()), false),
         }
+    }
+}
+
+/// Map a token-endpoint error to an outcome (+ "only a new scope is missing consent").
+fn classify_refresh_error(code: u16, body: &str) -> (RefreshOutcome, bool) {
+    let json = serde_json::from_str::<serde_json::Value>(body).ok();
+    let err = json.as_ref().and_then(|v| v["error"].as_str()).unwrap_or("");
+    let desc = json.as_ref().and_then(|v| v["error_description"].as_str()).unwrap_or("").to_lowercase();
+    match err {
+        "invalid_grant" | "interaction_required" | "consent_required" => {
+            // AADSTS65001: the user has not consented to (one of) the requested scopes.
+            let consent_missing = err == "consent_required" || desc.contains("aadsts65001") || desc.contains("consent");
+            (RefreshOutcome::InvalidGrant(format!("{}: {}", code, err)), consent_missing)
+        }
+        _ => (RefreshOutcome::Transient(format!("HTTP {}: {}", code, body)), false),
+    }
+}
+
+impl Refresher for MsRefresher {
+    fn refresh(&self, refresh_token: &str) -> RefreshOutcome {
+        use std::sync::atomic::Ordering;
+        if !self.full_scope_unavailable.load(Ordering::Relaxed) {
+            let (outcome, consent_missing) = Self::attempt(refresh_token, GRAPH_SCOPE);
+            if !consent_missing {
+                return outcome;
+            }
+            warn!("Account has not consented to all scopes (e.g. Contacts.Read); refreshing with base scopes. \
+                   Sign in to the account again to grant them.");
+            self.full_scope_unavailable.store(true, Ordering::Relaxed);
+        }
+        Self::attempt(refresh_token, GRAPH_SCOPE_BASE).0
     }
 }
 
@@ -89,7 +122,7 @@ pub fn broker_for(account_id: &str) -> Arc<TokenBroker> {
         (Arc::new(token_store::MemoryStore::default()), Arc::new(OfflineRefresher));
     #[cfg(not(test))]
     let (store, refresher): (Arc<dyn token_store::TokenStore>, Arc<dyn Refresher>) =
-        (Arc::new(KeyringStore), Arc::new(MsRefresher));
+        (Arc::new(KeyringStore), Arc::new(MsRefresher::new()));
 
     #[cfg(not(test))]
     if account_id == DEFAULT_ACCOUNT {
@@ -501,5 +534,32 @@ impl AuthManager {
 impl Default for AuthManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn missing_consent_is_distinguished_from_a_dead_grant() {
+        let consent = r#"{"error":"invalid_grant","error_description":"AADSTS65001: The user or administrator has not consented to use the application"}"#;
+        let (o, missing) = classify_refresh_error(400, consent);
+        assert!(matches!(o, RefreshOutcome::InvalidGrant(_)) && missing);
+
+        let revoked = r#"{"error":"invalid_grant","error_description":"AADSTS70008: The provided authorization code or refresh token has expired"}"#;
+        let (o, missing) = classify_refresh_error(400, revoked);
+        assert!(matches!(o, RefreshOutcome::InvalidGrant(_)) && !missing);
+
+        let (o, missing) = classify_refresh_error(503, "service unavailable");
+        assert!(matches!(o, RefreshOutcome::Transient(_)) && !missing);
+    }
+
+    #[test]
+    fn full_scope_adds_contacts_to_the_base_scopes() {
+        for scope in GRAPH_SCOPE_BASE.split(' ') {
+            assert!(GRAPH_SCOPE.split(' ').any(|s| s == scope), "{} missing from full scope", scope);
+        }
+        assert!(GRAPH_SCOPE.contains("Contacts.Read") && !GRAPH_SCOPE_BASE.contains("Contacts.Read"));
     }
 }

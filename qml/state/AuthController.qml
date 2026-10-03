@@ -21,6 +21,23 @@ Item {
   // Bumped by the backend after each completed login/sign-out (also while another
   // account is already signed in, when isAuthenticated doesn't change).
   property double loginSerial: 0
+
+  // Set when a sign-in was for a mailbox that is already signed in:
+  // { pending_id, account_id, email } — the UI must ask before anything is replaced.
+  property var reauthPrompt: null
+
+  function answerReauth(decision) {
+    var prompt = root.reauthPrompt
+    if (!prompt) return
+    root.reauthPrompt = null
+    var xhr = new XMLHttpRequest()
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState === XMLHttpRequest.DONE) root.accountsChanged()
+    }
+    xhr.open("POST", root.backendUrl + "/auth/confirm?pending=" + encodeURIComponent(prompt.pending_id)
+                     + "&decision=" + decision)
+    xhr.send()
+  }
   signal accountsChanged()
 
   function startLogin(provider) {
@@ -86,6 +103,14 @@ Item {
       var was = root.isAuthenticated
       root.isAuthenticated = data.is_authenticated === true
       if (data.error) root.errorMessage = data.error
+      if (data.confirm_reauth) {
+        root.reauthPrompt = data.confirm_reauth
+        root.showModal = false
+        countdown.stop()
+        root.userCode = ""
+      } else {
+        root.reauthPrompt = null
+      }
       var serial = data.login_serial || 0
       if (serial !== root.loginSerial) {
         root.loginSerial = serial

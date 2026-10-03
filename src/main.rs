@@ -348,6 +348,66 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     continue;
                 }
 
+                // ── GET /contacts?view=all|favorites|lists&sort=first|last|company|recent ──
+                if first_line.contains("GET /contacts") {
+                    let view = query_param(first_line, "view").unwrap_or_else(|| "all".to_string());
+                    let sort = query_param(first_line, "sort").unwrap_or_else(|| "first".to_string());
+                    let body = match Database::open(config_dir.join("messages.db").to_str().unwrap_or("messages.db")) {
+                        Ok(db) => match db.query_contacts(&view, &sort) {
+                            Ok(rows) => serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string()),
+                            Err(e) => {
+                                warn!("GET /contacts: query failed: {}", e);
+                                "[]".to_string()
+                            }
+                        },
+                        Err(e) => {
+                            warn!("GET /contacts: DB open failed: {}", e);
+                            "[]".to_string()
+                        }
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── POST /contacts/favorite?id=ID&value=true|false — local favorite flag ──
+                if first_line.contains("POST /contacts/favorite") {
+                    let id = query_param(first_line, "id").unwrap_or_default();
+                    let value = query_param(first_line, "value").as_deref() == Some("true");
+                    let ok = Database::open(config_dir.join("messages.db").to_str().unwrap_or("messages.db"))
+                        .and_then(|db| db.set_contact_favorite(&id, value))
+                        .is_ok();
+                    let body = if ok { "ok" } else { "error" };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── POST /auth/confirm?pending=ID&decision=replace|cancel — answer the
+                // "this mailbox is already signed in — replace its sign-in?" prompt ──
+                if first_line.contains("POST /auth/confirm") {
+                    let pending_id = query_param(first_line, "pending").unwrap_or_default();
+                    let replace = query_param(first_line, "decision").as_deref() == Some("replace");
+                    let ok = SCHEDULER
+                        .get()
+                        .map(|sch| omarchylook::account_ops::resolve_reauth(config_dir, &pending_id, replace, sch))
+                        .map(|r| r.map_err(|e| error!("❌ re-authentication answer failed: {}", e)).is_ok())
+                        .unwrap_or(false);
+                    let body = if ok { "ok" } else { "error" };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
                 // ── POST /accounts/login?account=ID — log in an existing account ──
                 // Reuses the kept token when there is one; otherwise tells the UI to run a device flow.
                 if first_line.contains("POST /accounts/login") {

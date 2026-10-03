@@ -2,7 +2,7 @@
 
 use crate::errors::{OmarchyError, Result};
 use crate::accounts;
-use crate::models::{Account, CachedMessage, CalendarEvent, EmailMessage, MailFolder, Message};
+use crate::models::{Account, CachedMessage, CalendarEvent, Contact, ContactAddress, ContactFolder, ContactPhone, ContactRow, EmailMessage, MailFolder, Message};
 use crate::token_store::DEFAULT_ACCOUNT;
 use log::{debug, info};
 use rusqlite::{Connection, params, OptionalExtension};
@@ -140,11 +140,47 @@ impl Database {
             [],
         )?;
 
+        self.init_contacts_schema()?;
         self.init_accounts_schema()?;
 
         Ok(())
     }
     
+    /// Contacts + contact folders. List-valued fields (emails, phones, addresses) are stored
+    /// as JSON arrays: they are only ever read back whole, never queried per element.
+    fn init_contacts_schema(&self) -> Result<()> {
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS contact_folders (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                parent_folder_id TEXT,
+                cached_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS contacts (
+                id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                given_name TEXT NOT NULL DEFAULT '',
+                surname TEXT NOT NULL DEFAULT '',
+                company TEXT NOT NULL DEFAULT '',
+                job_title TEXT NOT NULL DEFAULT '',
+                emails TEXT NOT NULL DEFAULT '[]',
+                phones TEXT NOT NULL DEFAULT '[]',
+                addresses TEXT NOT NULL DEFAULT '[]',
+                folder_id TEXT,
+                created_at TEXT NOT NULL DEFAULT '',
+                modified_at TEXT NOT NULL DEFAULT '',
+                is_favorite INTEGER NOT NULL DEFAULT 0,
+                cached_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_contacts_folder ON contacts(folder_id)", [])?;
+        Ok(())
+    }
+
     /// FTS sync trigger for message updates (unchanged definition; factored out so the
     /// account backfill can suspend it inside its transaction).
     fn create_messages_au_trigger(&self) -> Result<()> {
@@ -186,7 +222,7 @@ impl Database {
         }
 
         let mut backfill_needed = false;
-        for table in ["messages", "folders", "calendar_events"] {
+        for table in ["messages", "folders", "calendar_events", "contacts", "contact_folders"] {
             let has_col: bool = self.conn.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name='account_id'",
                 params![table],
@@ -217,7 +253,7 @@ impl Database {
                 // the full-text index for every row; suspend it for this transaction.
                 // (DDL is transactional: a rollback restores the trigger.)
                 self.conn.execute("DROP TRIGGER IF EXISTS messages_au", [])?;
-                for table in ["messages", "folders", "calendar_events"] {
+                for table in ["messages", "folders", "calendar_events", "contacts", "contact_folders"] {
                     let n = self.conn.execute(
                         &format!("UPDATE {} SET account_id = ?1 WHERE account_id IS NULL", table),
                         params![DEFAULT_ACCOUNT],
@@ -331,7 +367,7 @@ impl Database {
     pub fn delete_account(&self, account_id: &str) -> Result<()> {
         self.conn.execute_batch("BEGIN")?;
         let result = (|| -> Result<()> {
-            for table in ["messages", "folders", "calendar_events"] {
+            for table in ["messages", "folders", "calendar_events", "contacts", "contact_folders"] {
                 self.conn.execute(&format!("DELETE FROM {} WHERE account_id = ?1", table), params![account_id])?;
             }
             self.conn.execute("DELETE FROM accounts WHERE id = ?1", params![account_id])?;
@@ -626,6 +662,107 @@ impl Database {
         Ok(messages)
     }
 
+
+    // ------------------------------------------------------------ contacts
+
+    pub fn upsert_contact_folder(&self, f: &ContactFolder) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO contact_folders (id, display_name, parent_folder_id, cached_at, account_id)
+             VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+               display_name = excluded.display_name,
+               parent_folder_id = excluded.parent_folder_id,
+               cached_at = CURRENT_TIMESTAMP",
+            params![f.id, f.display_name, f.parent_folder_id, self.account_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_contact_folders(&self) -> Result<Vec<ContactFolder>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, display_name, parent_folder_id FROM contact_folders WHERE account_id = ?1 ORDER BY display_name",
+        )?;
+        let rows = stmt
+            .query_map(params![self.account_id], |r| {
+                Ok(ContactFolder { id: r.get(0)?, display_name: r.get(1)?, parent_folder_id: r.get(2)? })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Insert or update a contact. Local-only state (is_favorite) is never overwritten by sync.
+    pub fn upsert_contact(&self, c: &Contact) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO contacts (id, display_name, given_name, surname, company, job_title, emails, phones, addresses,
+                                   folder_id, created_at, modified_at, cached_at, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, CURRENT_TIMESTAMP, ?13)
+             ON CONFLICT(id) DO UPDATE SET
+               display_name = excluded.display_name, given_name = excluded.given_name,
+               surname = excluded.surname, company = excluded.company, job_title = excluded.job_title,
+               emails = excluded.emails, phones = excluded.phones, addresses = excluded.addresses,
+               folder_id = excluded.folder_id, created_at = excluded.created_at,
+               modified_at = excluded.modified_at, cached_at = CURRENT_TIMESTAMP",
+            params![
+                c.id, c.display_name, c.given_name, c.surname, c.company, c.job_title,
+                serde_json::to_string(&c.emails)?, serde_json::to_string(&c.phones)?,
+                serde_json::to_string(&c.addresses)?, c.folder_id, c.created_at, c.modified_at,
+                self.account_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_contact_favorite(&self, id: &str, favorite: bool) -> Result<()> {
+        self.conn.execute("UPDATE contacts SET is_favorite = ?1 WHERE id = ?2", params![favorite, id])?;
+        Ok(())
+    }
+
+    /// Contacts for the People view. `view`: all | favorites | lists (grouped by folder,
+    /// folders alphabetical). `sort`: first | last | company | recent. Entries missing the
+    /// sort key always go last.
+    pub fn query_contacts(&self, view: &str, sort: &str) -> Result<Vec<ContactRow>> {
+        // `x = ''` sorts empty values after real ones.
+        let key = match sort {
+            "last"    => "(c.surname = ''), lower(c.surname), lower(c.given_name), lower(c.display_name)",
+            "company" => "(c.company = ''), lower(c.company), lower(c.display_name)",
+            "recent"  => "c.created_at DESC, lower(c.display_name)",
+            _         => "(c.given_name = ''), lower(c.given_name), lower(c.surname), lower(c.display_name)",
+        };
+        let (filter, order) = match view {
+            "favorites" => ("WHERE c.is_favorite = 1", key.to_string()),
+            "lists"     => ("", format!("lower(COALESCE(f.display_name, 'Contacts')), {}", key)),
+            _           => ("", key.to_string()),
+        };
+        let sql = format!(
+            "SELECT c.id, c.display_name, c.given_name, c.surname, c.company, c.job_title, c.emails, c.phones,
+                    c.addresses, c.folder_id, c.created_at, c.modified_at, COALESCE(f.display_name, 'Contacts'), c.is_favorite
+             FROM contacts c LEFT JOIN contact_folders f ON f.id = c.folder_id
+             {} ORDER BY {}",
+            filter, order
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map([], |r| {
+                let emails: String = r.get(6)?;
+                let phones: String = r.get(7)?;
+                let addresses: String = r.get(8)?;
+                Ok(ContactRow {
+                    contact: Contact {
+                        id: r.get(0)?, display_name: r.get(1)?, given_name: r.get(2)?, surname: r.get(3)?,
+                        company: r.get(4)?, job_title: r.get(5)?,
+                        emails: serde_json::from_str(&emails).unwrap_or_default(),
+                        phones: serde_json::from_str::<Vec<ContactPhone>>(&phones).unwrap_or_default(),
+                        addresses: serde_json::from_str::<Vec<ContactAddress>>(&addresses).unwrap_or_default(),
+                        folder_id: r.get(9)?, created_at: r.get(10)?, modified_at: r.get(11)?,
+                    },
+                    folder_name: r.get(12)?,
+                    is_favorite: r.get(13)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     // ------------------------------------------------------------ calendar
 
     /// Insert or update a calendar event (updates so reschedules/edits propagate)
@@ -883,5 +1020,85 @@ mod real_db_copy {
         println!("accounts: {:?}", db.list_accounts().unwrap());
         let fts: i64 = db.conn.query_row("SELECT COUNT(*) FROM messages_fts", [], |r| r.get(0)).unwrap();
         println!("messages_fts rows: {}", fts);
+    }
+}
+
+#[cfg(test)]
+mod contact_tests {
+    use super::*;
+
+    fn c(id: &str, given: &str, sur: &str, company: &str, created: &str) -> Contact {
+        Contact {
+            id: id.into(), display_name: format!("{} {}", given, sur).trim().to_string(),
+            given_name: given.into(), surname: sur.into(), company: company.into(),
+            created_at: created.into(), ..Default::default()
+        }
+    }
+    fn ids(rows: &[ContactRow]) -> Vec<&str> { rows.iter().map(|r| r.contact.id.as_str()).collect() }
+
+    fn seeded() -> Database {
+        let db = Database::open_for_account(":memory:", "exchange-aaaaaa").unwrap();
+        db.upsert_contact_folder(&ContactFolder { id: "f1".into(), display_name: "Zeta list".into(), parent_folder_id: None }).unwrap();
+        db.upsert_contact_folder(&ContactFolder { id: "f2".into(), display_name: "Alpha list".into(), parent_folder_id: None }).unwrap();
+        let mut a = c("a", "Bob", "Zimmer", "", "2026-01-01T00:00:00Z"); a.folder_id = Some("f1".into());
+        let mut b = c("b", "alice", "Young", "Acme", "2026-03-01T00:00:00Z"); b.folder_id = Some("f2".into());
+        let d = c("d", "", "", "Zorg", "2026-02-01T00:00:00Z");           // no first/last name
+        db.upsert_contact(&a).unwrap(); db.upsert_contact(&b).unwrap(); db.upsert_contact(&d).unwrap();
+        db
+    }
+
+    #[test]
+    fn sorts_by_each_key_with_missing_values_last() {
+        let db = seeded();
+        assert_eq!(ids(&db.query_contacts("all", "first").unwrap()), vec!["b", "a", "d"], "case-insensitive, empty last");
+        assert_eq!(ids(&db.query_contacts("all", "last").unwrap()), vec!["b", "a", "d"]);
+        assert_eq!(ids(&db.query_contacts("all", "company").unwrap()), vec!["b", "d", "a"]);
+        assert_eq!(ids(&db.query_contacts("all", "recent").unwrap()), vec!["b", "d", "a"]);
+    }
+
+    #[test]
+    fn favorites_view_and_sync_never_clears_a_favorite() {
+        let db = seeded();
+        db.set_contact_favorite("a", true).unwrap();
+        assert_eq!(ids(&db.query_contacts("favorites", "first").unwrap()), vec!["a"]);
+        // a sync re-upserts the same contact with a changed name: favorite must survive
+        let mut a = c("a", "Robert", "Zimmer", "", "2026-01-01T00:00:00Z"); a.folder_id = Some("f1".into());
+        db.upsert_contact(&a).unwrap();
+        let fav = db.query_contacts("favorites", "first").unwrap();
+        assert_eq!(fav.len(), 1);
+        assert_eq!(fav[0].contact.given_name, "Robert");
+        assert!(fav[0].is_favorite);
+    }
+
+    #[test]
+    fn lists_view_groups_by_folder_alphabetically() {
+        let db = seeded();
+        let rows = db.query_contacts("lists", "first").unwrap();
+        // Alpha list (b), Contacts (d: no folder), Zeta list (a)
+        assert_eq!(ids(&rows), vec!["b", "d", "a"]);
+        assert_eq!(rows[0].folder_name, "Alpha list");
+        assert_eq!(rows[1].folder_name, "Contacts");
+    }
+
+    #[test]
+    fn list_fields_round_trip() {
+        let db = Database::open(":memory:").unwrap();
+        let mut x = c("x", "A", "B", "Co", "2026-01-01T00:00:00Z");
+        x.emails = vec!["a@x.com".into(), "b@x.com".into()];
+        x.phones = vec![ContactPhone { kind: "mobile".into(), number: "555-1".into() }, ContactPhone { kind: "home".into(), number: "555-2".into() }];
+        x.addresses = vec![ContactAddress { kind: "home".into(), text: "1 Main St, Town, ST 12345, US".into() }];
+        db.upsert_contact(&x).unwrap();
+        let got = &db.query_contacts("all", "first").unwrap()[0].contact;
+        assert_eq!(got, &x);
+    }
+
+    #[test]
+    fn contacts_are_stamped_with_account_and_deleted_with_it() {
+        let db = Database::open_for_account(":memory:", "exchange-aaaaaa").unwrap();
+        db.upsert_contact(&c("x", "A", "B", "", "2026-01-01T00:00:00Z")).unwrap();
+        let acct: String = db.conn.query_row("SELECT account_id FROM contacts WHERE id='x'", [], |r| r.get(0)).unwrap();
+        assert_eq!(acct, "exchange-aaaaaa");
+        db.delete_account("exchange-aaaaaa").unwrap();
+        assert!(db.query_contacts("all", "first").unwrap().is_empty());
     }
 }

@@ -1,6 +1,6 @@
 //! Per-account sync scheduler.
 //!
-//! Each running account gets one mail thread and one calendar thread, each with
+//! Each running account gets one mail, one calendar and one contacts thread, each with
 //! its own current-thread tokio runtime (the daemons use blocking HTTP/SQLite
 //! calls, so a stall in one account can't delay another). Both threads of an
 //! account share that account's `TokenBroker`, hence one token refresh at a
@@ -10,9 +10,10 @@
 use crate::auth::{broker_for, AuthManager};
 use crate::accounts::provider_of;
 use crate::calendar_daemon::{CalendarDaemon, CalendarDaemonConfig};
+use crate::contacts_daemon::{ContactsDaemon, ContactsDaemonConfig};
 use crate::db::Database;
 use crate::email_daemon::{DaemonConfig, EmailDaemon};
-use crate::providers::{GraphCalendarProvider, GraphEmailProvider};
+use crate::providers::{GraphCalendarProvider, GraphContactsProvider, GraphEmailProvider};
 use log::{error, info, warn};
 use std::collections::HashMap;
 use std::future::Future;
@@ -83,6 +84,7 @@ impl SyncScheduler {
 
         let mail_stop = Arc::new(Notify::new());
         let cal_stop = Arc::new(Notify::new());
+        let contacts_stop = Arc::new(Notify::new());
 
         let (id, path) = (account_id.to_string(), self.db_str());
         spawn_sync_thread(format!("mail-{}", account_id), mail_stop.clone(), move || async move {
@@ -105,7 +107,17 @@ impl SyncScheduler {
             CalendarDaemon::new(CalendarDaemonConfig::default(), db, provider).start().await;
         });
 
-        running.insert(account_id.to_string(), vec![mail_stop, cal_stop]);
+        let (id, path) = (account_id.to_string(), self.db_str());
+        spawn_sync_thread(format!("contacts-{}", account_id), contacts_stop.clone(), move || async move {
+            let provider = Arc::new(GraphContactsProvider::new(AuthManager::for_account(&id)));
+            let db = match Database::open_for_account(&path, &id) {
+                Ok(db) => Arc::new(db),
+                Err(e) => return error!("Contacts sync {}: cannot open database: {}", id, e),
+            };
+            ContactsDaemon::new(ContactsDaemonConfig::default(), db, provider).start().await;
+        });
+
+        running.insert(account_id.to_string(), vec![mail_stop, cal_stop, contacts_stop]);
         info!("Scheduler: started sync for account {}", account_id);
         true
     }

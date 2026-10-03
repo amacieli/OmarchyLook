@@ -16,6 +16,9 @@ Item {
   property bool backendOnline: false
   // Calendar view chosen in the calendar dropdown: day | workweek | week | month
   property string calendarMode: "month"
+  // People view dropdowns: all | favorites | lists   and   first | last | company | recent
+  property string peopleView: "all"
+  property string peopleSort: "first"
   readonly property alias auth: authController
 
   // ---------------------------------------------------------- navigation

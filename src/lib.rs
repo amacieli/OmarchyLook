@@ -21,6 +21,7 @@ pub mod errors;
 pub mod qt_bridge;
 pub mod email_daemon;
 pub mod calendar_daemon;
+pub mod contacts_daemon;
 pub mod providers;
 
 pub use auth::AuthManager;

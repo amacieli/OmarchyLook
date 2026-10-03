@@ -34,7 +34,15 @@ pub fn fetch_account_email(account_id: &str) -> Option<String> {
 /// auth_state.json is what the QML auth watcher reads. `is_authenticated` means
 /// "at least one account is signed in"; `login_serial` bumps after each completed login.
 pub fn write_auth_state(config_dir: &Path, error: Option<&str>, login_serial: Option<u64>) {
+    write_auth_state_with(config_dir, error, login_serial, None)
+}
+
+/// As `write_auth_state`, plus an optional `confirm_reauth` prompt for the UI.
+pub fn write_auth_state_with(config_dir: &Path, error: Option<&str>, login_serial: Option<u64>, confirm_reauth: Option<serde_json::Value>) {
     let mut state = serde_json::json!({ "is_authenticated": any_account_authenticated() });
+    if let Some(c) = confirm_reauth {
+        state["confirm_reauth"] = c;
+    }
     if let Some(e) = error {
         state["error"] = e.into();
     }
@@ -110,8 +118,9 @@ pub enum LoginOutcome {
     Added(String),
     /// The mailbox already existed but was signed out; its tokens were replaced.
     Rebound(String),
-    /// The mailbox is already signed in under another account.
-    Duplicate(String),
+    /// The mailbox is already signed in under account `existing_id`. Nothing is changed until
+    /// the user confirms replacing that account's credentials with the new login.
+    ConfirmReauth { existing_id: String, email: String },
 }
 
 /// Decide what a completed login means. Pure of I/O beyond the DB so it can be tested:
@@ -132,7 +141,7 @@ pub fn register_login(
         });
         if let Some(existing) = existing {
             if existing.enabled && is_signed_in(&existing.id) {
-                return Ok(LoginOutcome::Duplicate(email.to_string()));
+                return Ok(LoginOutcome::ConfirmReauth { existing_id: existing.id, email: email.to_string() });
             }
             move_tokens(id, &existing.id)?;
             return Ok(LoginOutcome::Rebound(existing.id));
@@ -184,9 +193,9 @@ fn finish_login(config_dir: &Path, id: &str, provider: &str, scheduler: &SyncSch
             scheduler.start_account(&id);
             write_auth_state(config_dir, None, Some(now_serial()));
         }
-        Ok(LoginOutcome::Duplicate(email)) => {
-            let _ = broker_for(id).sign_out();
-            write_auth_state(config_dir, Some(&format!("{} is already signed in", email)), Some(now_serial()));
+        Ok(LoginOutcome::ConfirmReauth { existing_id, email }) => {
+            // Hold the new credentials under the pending id and ask before replacing anything.
+            hold_pending_reauth(config_dir, id, &existing_id, &email);
         }
         Err(e) => {
             error!("finish_login failed: {}", e);
@@ -194,6 +203,78 @@ fn finish_login(config_dir: &Path, id: &str, provider: &str, scheduler: &SyncSch
             write_auth_state(config_dir, Some(&format!("Could not add account: {}", e)), Some(now_serial()));
         }
     }
+}
+
+// ─────────────────────────────────────────── re-authenticate in place
+
+struct PendingReauth {
+    existing_id: String,
+}
+
+fn pending() -> &'static Mutex<std::collections::HashMap<String, PendingReauth>> {
+    static P: OnceLock<Mutex<std::collections::HashMap<String, PendingReauth>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// How long an unanswered "replace sign-in?" prompt keeps the new credentials around.
+const REAUTH_PROMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Keep the freshly obtained credentials under `pending_id` and ask the UI to confirm.
+/// The prompt cancels itself after `REAUTH_PROMPT_TIMEOUT` so the credentials never linger.
+fn hold_pending_reauth(config_dir: &Path, pending_id: &str, existing_id: &str, email: &str) {
+    pending()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(pending_id.to_string(), PendingReauth { existing_id: existing_id.to_string() });
+    write_auth_state_with(
+        config_dir,
+        None,
+        None,
+        Some(serde_json::json!({ "pending_id": pending_id, "account_id": existing_id, "email": email })),
+    );
+
+    let (dir, pid) = (config_dir.to_path_buf(), pending_id.to_string());
+    std::thread::spawn(move || {
+        std::thread::sleep(REAUTH_PROMPT_TIMEOUT);
+        if pending().lock().unwrap_or_else(|p| p.into_inner()).contains_key(&pid) {
+            warn!("Re-authentication prompt for {} timed out; discarding the new credentials", pid);
+            let _ = discard_pending(&dir, &pid);
+        }
+    });
+}
+
+fn discard_pending(config_dir: &Path, pending_id: &str) -> Result<()> {
+    pending().lock().unwrap_or_else(|p| p.into_inner()).remove(pending_id);
+    broker_for(pending_id).sign_out()?;
+    write_auth_state(config_dir, None, Some(now_serial()));
+    Ok(())
+}
+
+/// Apply the user's answer to a "replace sign-in?" prompt.
+/// `replace`: move the new credentials onto the existing account (it keeps its id, settings and
+/// cached data; running sync picks the new token up). Otherwise discard them.
+pub fn resolve_reauth(config_dir: &Path, pending_id: &str, replace: bool, scheduler: &SyncScheduler) -> Result<()> {
+    let entry = pending().lock().unwrap_or_else(|p| p.into_inner()).remove(pending_id);
+    let Some(entry) = entry else {
+        return Err(OmarchyError::SettingsError("no pending re-authentication (it may have timed out)".into()));
+    };
+    if !replace {
+        broker_for(pending_id).sign_out()?;
+        write_auth_state(config_dir, None, Some(now_serial()));
+        return Ok(());
+    }
+    let snapshot = broker_for(pending_id)
+        .snapshot()
+        .ok_or_else(|| OmarchyError::TokenError("new credentials are no longer available".into()))?;
+    broker_for(&entry.existing_id).adopt(&snapshot)?;
+    broker_for(pending_id).sign_out()?;
+    if let Ok(db) = Database::open(&db_path(config_dir)) {
+        let _ = db.set_account_enabled(&entry.existing_id, true);
+    }
+    scheduler.start_account(&entry.existing_id); // no-op if it is already running
+    info!("Re-authenticated account {} in place", entry.existing_id);
+    write_auth_state(config_dir, None, Some(now_serial()));
+    Ok(())
 }
 
 // ───────────────────────────────────────────────── sign out / remove
@@ -283,11 +364,13 @@ mod tests {
     }
 
     #[test]
-    fn signing_in_to_an_already_signed_in_mailbox_is_a_duplicate() {
+    fn signing_in_to_an_already_signed_in_mailbox_asks_for_confirmation_and_changes_nothing() {
         let d = db();
         register_login(&d, "exchange-aaaaaa", "exchange", Some("a@x.com"), &|_| true, &|_, _| Ok(())).unwrap();
-        let out = register_login(&d, "exchange-bbbbbb", "exchange", Some("A@X.com"), &|_| true, &|_, _| Ok(())).unwrap();
-        assert_eq!(out, LoginOutcome::Duplicate("A@X.com".into()));
+        let moved = RefCell::new(0);
+        let out = register_login(&d, "exchange-bbbbbb", "exchange", Some("A@X.com"), &|_| true, &|_, _| { *moved.borrow_mut() += 1; Ok(()) }).unwrap();
+        assert_eq!(out, LoginOutcome::ConfirmReauth { existing_id: "exchange-aaaaaa".into(), email: "A@X.com".into() });
+        assert_eq!(*moved.borrow(), 0, "credentials must not move before the user confirms");
         assert_eq!(d.list_accounts().unwrap().len(), 1, "no second row");
     }
 
@@ -328,5 +411,53 @@ mod tests {
         let d = db();
         let out = register_login(&d, "exchange-aaaaaa", "exchange", None, &|_| false, &|_, _| Ok(())).unwrap();
         assert_eq!(out, LoginOutcome::Added("exchange-aaaaaa".into()));
+    }
+
+    // ── re-authentication prompt (test brokers use in-memory stores, never the real keyring) ──
+    fn tok(a: &str, r: &str) -> crate::models::CachedToken {
+        crate::models::CachedToken { access_token: a.into(), refresh_token: Some(r.into()) }
+    }
+    fn setup(tag: &str) -> (std::path::PathBuf, SyncScheduler, String, String) {
+        let dir = std::env::temp_dir().join(format!("omarchylook-reauth-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // unsupported provider => the scheduler never spawns real sync threads in tests
+        let (existing, pending_id) = (format!("gmail-{}1", tag), format!("gmail-{}2", tag));
+        broker_for(&existing).adopt(&tok("old", "r_old")).unwrap();
+        broker_for(&pending_id).adopt(&tok("new", "r_new")).unwrap();
+        (dir.clone(), SyncScheduler::new(&dir), existing, pending_id)
+    }
+
+    #[test]
+    fn confirming_replaces_the_existing_accounts_credentials_in_place() {
+        let (dir, sched, existing, pending_id) = setup("yes");
+        hold_pending_reauth(&dir, &pending_id, &existing, "a@x.com");
+        assert!(std::fs::read_to_string(dir.join("auth_state.json")).unwrap().contains("confirm_reauth"));
+
+        resolve_reauth(&dir, &pending_id, true, &sched).unwrap();
+        assert_eq!(broker_for(&existing).snapshot().unwrap().refresh_token.as_deref(), Some("r_new"));
+        assert!(!broker_for(&pending_id).is_authenticated(), "temporary credentials must be gone");
+        assert!(!std::fs::read_to_string(dir.join("auth_state.json")).unwrap().contains("confirm_reauth"), "prompt cleared");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancelling_keeps_the_existing_credentials_and_discards_the_new_ones() {
+        let (dir, sched, existing, pending_id) = setup("no");
+        hold_pending_reauth(&dir, &pending_id, &existing, "a@x.com");
+
+        resolve_reauth(&dir, &pending_id, false, &sched).unwrap();
+        assert_eq!(broker_for(&existing).snapshot().unwrap().refresh_token.as_deref(), Some("r_old"));
+        assert!(!broker_for(&pending_id).is_authenticated());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn answering_twice_or_for_an_unknown_prompt_is_an_error_not_a_second_replace() {
+        let (dir, sched, existing, pending_id) = setup("twice");
+        hold_pending_reauth(&dir, &pending_id, &existing, "a@x.com");
+        resolve_reauth(&dir, &pending_id, false, &sched).unwrap();
+        assert!(resolve_reauth(&dir, &pending_id, true, &sched).is_err());
+        assert_eq!(broker_for(&existing).snapshot().unwrap().refresh_token.as_deref(), Some("r_old"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
