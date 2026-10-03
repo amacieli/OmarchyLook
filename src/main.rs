@@ -585,6 +585,40 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     continue;
                 }
 
+                // ── GET|POST /settings/calendar — recurring-meeting window (years back / ahead) ──
+                if first_line.contains("GET /settings/calendar") || first_line.contains("POST /settings/calendar") {
+                    use omarchylook::models::CalendarSettings;
+                    let settings_path = config_dir.join("settings.toml");
+                    let current = if first_line.contains("POST /settings/calendar") {
+                        let cur = omarchylook::settings::read_calendar_settings(&settings_path);
+                        let wanted = CalendarSettings {
+                            recurrence_years_back: query_param(first_line, "back").and_then(|v| v.parse().ok()).unwrap_or(cur.recurrence_years_back),
+                            recurrence_years_ahead: query_param(first_line, "ahead").and_then(|v| v.parse().ok()).unwrap_or(cur.recurrence_years_ahead),
+                        };
+                        match omarchylook::settings::write_calendar_settings(&settings_path, &wanted) {
+                            Ok(stored) => stored,
+                            Err(e) => {
+                                warn!("POST /settings/calendar: could not save: {}", e);
+                                cur
+                            }
+                        }
+                    } else {
+                        omarchylook::settings::read_calendar_settings(&settings_path)
+                    };
+                    let body = serde_json::json!({
+                        "recurrence_years_back": current.recurrence_years_back,
+                        "recurrence_years_ahead": current.recurrence_years_ahead,
+                        "max_years_back": CalendarSettings::MAX_YEARS_BACK,
+                        "max_years_ahead": CalendarSettings::MAX_YEARS_AHEAD,
+                    }).to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
                 // ── POST /settings/sidebar_expanded — persist sidebar state ────
                 if first_line.contains("POST /settings/sidebar_expanded") {
                     // Body is "true" or "false" — read remaining request bytes

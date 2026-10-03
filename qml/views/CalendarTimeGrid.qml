@@ -21,7 +21,7 @@ Item {
     property color  lineColor:    "#141414"
 
     property int hourHeight:  48
-    property int gutterWidth: 52
+    property int gutterWidth: 60
     property int headerHeight: 56
     property int firstVisibleHour: 7
 
@@ -30,13 +30,18 @@ Item {
 
     readonly property real colWidth: days.length > 0 ? (width - gutterWidth) / days.length : 0
 
-    // all-day strip height = tallest day
-    property int allDayRows: {
+    // "All day" row: always present; collapsed it shows each day's first all-day event and a
+    // "+N" badge, expanded it lists every one (scrolling past maxAllDayHeight).
+    property bool allDayExpanded: false
+    readonly property int allDayCollapsedHeight: 24
+    readonly property int maxAllDayHeight: 200
+    property int allDayMax: {
         var m = 0
         for (var i = 0; i < days.length; i++)
             m = Math.max(m, CU.allDayOnDay(events, days[i]).length)
-        return Math.min(m, 4)
+        return m
     }
+    readonly property int allDayExpandedHeight: Math.min(Math.max(allDayMax, 1) * 20 + 6, maxAllDayHeight)
 
     ColumnLayout {
         anchors.fill: parent
@@ -101,46 +106,117 @@ Item {
             }
         }
 
-        // ── all-day strip ─────────────────────────────────────────
-        Row {
-            visible: root.allDayRows > 0
+        // ── all-day row (expandable) ──────────────────────────────
+        Item {
+            id: allDayRow
             Layout.fillWidth: true
-            Layout.preferredHeight: visible ? root.allDayRows * 20 + 6 : 0
+            Layout.preferredHeight: root.allDayExpanded ? root.allDayExpandedHeight : root.allDayCollapsedHeight
+            clip: true
+            Behavior on Layout.preferredHeight { NumberAnimation { duration: 120; easing.type: Easing.OutQuad } }
+
+            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.lineColor }
+
+            // label + chevron: click to expand / collapse
             Item {
-                width: root.gutterWidth; height: parent.height
-                Text {
+                id: allDayLabel
+                width: root.gutterWidth; height: root.allDayCollapsedHeight
+                Row {
                     anchors.right: parent.right; anchors.rightMargin: 6
-                    anchors.top: parent.top; anchors.topMargin: 4
-                    text: "all-day"
-                    font.family: root.monoFont; font.pixelSize: 9
-                    color: root.dimColor
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 4
+                    Text {
+                        text: root.allDayExpanded ? "\u25be" : "\u25b8"
+                        font.family: root.monoFont; font.pixelSize: 10
+                        color: allDayToggle.containsMouse ? root.accentColor : root.dimColor
+                    }
+                    Text {
+                        text: "all day"
+                        font.family: root.monoFont; font.pixelSize: 9
+                        color: allDayToggle.containsMouse ? root.accentColor : root.dimColor
+                    }
+                }
+                MouseArea {
+                    id: allDayToggle
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.allDayExpanded = !root.allDayExpanded
                 }
             }
-            Repeater {
-                model: root.days
-                delegate: Rectangle {
-                    width: root.colWidth
-                    height: parent.height
-                    color: "transparent"
-                    property var list: CU.allDayOnDay(root.events, modelData)
-                    Rectangle { anchors.left: parent.left; width: 1; height: parent.height; color: root.lineColor }
-                    Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: root.lineColor }
-                    Column {
-                        anchors.fill: parent
-                        anchors.margins: 3
-                        spacing: 2
-                        Repeater {
-                            model: Math.min(parent.parent.list.length, 4)
-                            delegate: Rectangle {
-                                width: parent.width; height: 18
+
+            Row {
+                x: root.gutterWidth
+                width: parent.width - root.gutterWidth
+                height: parent.height
+                Repeater {
+                    model: root.days
+                    delegate: Item {
+                        id: adCell
+                        property var list: CU.allDayOnDay(root.events, modelData)
+                        width: root.colWidth
+                        height: parent.height
+                        clip: true
+
+                        Rectangle { anchors.left: parent.left; width: 1; height: parent.height; color: root.lineColor }
+
+                        // collapsed: first event + "+N more"
+                        Row {
+                            visible: !root.allDayExpanded && adCell.list.length > 0
+                            anchors.left: parent.left; anchors.right: parent.right
+                            anchors.leftMargin: 3; anchors.rightMargin: 3
+                            y: 3
+                            spacing: 3
+                            Rectangle {
+                                width: parent.width - (more.visible ? more.width + parent.spacing : 0)
+                                height: 18
                                 color: Qt.rgba(root.accentColor.r, root.accentColor.g, root.accentColor.b, 0.22)
                                 Text {
                                     anchors.fill: parent; anchors.leftMargin: 5; anchors.rightMargin: 3
                                     verticalAlignment: Text.AlignVCenter
-                                    text: parent.parent.parent.list[index].title
+                                    text: adCell.list.length > 0 ? adCell.list[0].title : ""
                                     elide: Text.ElideRight
                                     font.family: root.monoFont; font.pixelSize: 10
                                     color: root.textColor
+                                }
+                            }
+                            Text {
+                                id: more
+                                visible: adCell.list.length > 1
+                                height: 18
+                                verticalAlignment: Text.AlignVCenter
+                                text: "+" + (adCell.list.length - 1)
+                                font.family: root.monoFont; font.pixelSize: 10; font.bold: true
+                                color: root.accentColor
+                            }
+                        }
+
+                        // expanded: every event, scrolls if there are very many
+                        Flickable {
+                            visible: root.allDayExpanded
+                            anchors.fill: parent
+                            anchors.margins: 3
+                            contentWidth: width
+                            contentHeight: expandedColumn.implicitHeight
+                            boundsBehavior: Flickable.StopAtBounds
+                            interactive: contentHeight > height
+                            Column {
+                                id: expandedColumn
+                                width: parent.width
+                                spacing: 2
+                                Repeater {
+                                    model: adCell.list
+                                    delegate: Rectangle {
+                                        width: parent.width; height: 18
+                                        color: Qt.rgba(root.accentColor.r, root.accentColor.g, root.accentColor.b, 0.22)
+                                        Text {
+                                            anchors.fill: parent; anchors.leftMargin: 5; anchors.rightMargin: 3
+                                            verticalAlignment: Text.AlignVCenter
+                                            text: modelData.title
+                                            elide: Text.ElideRight
+                                            font.family: root.monoFont; font.pixelSize: 10
+                                            color: root.textColor
+                                        }
+                                    }
                                 }
                             }
                         }

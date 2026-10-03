@@ -139,6 +139,16 @@ impl Database {
             "CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_at)",
             [],
         )?;
+        for (col, decl) in [("event_type", "TEXT NOT NULL DEFAULT 'singleInstance'"), ("series_master_id", "TEXT")] {
+            let has: bool = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('calendar_events') WHERE name = ?1",
+                params![col],
+                |row| row.get::<_, i32>(0),
+            ).unwrap_or(0) > 0;
+            if !has {
+                self.conn.execute(&format!("ALTER TABLE calendar_events ADD COLUMN {} {}", col, decl), [])?;
+            }
+        }
 
         self.init_contacts_schema()?;
         self.init_accounts_schema()?;
@@ -768,8 +778,9 @@ impl Database {
     /// Insert or update a calendar event (updates so reschedules/edits propagate)
     pub fn upsert_event(&self, ev: &CalendarEvent) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO calendar_events (id, subject, body, start_at, end_at, is_all_day, time_zone, cached_at, account_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP, ?8)
+            "INSERT INTO calendar_events (id, subject, body, start_at, end_at, is_all_day, time_zone, cached_at, account_id,
+                                          event_type, series_master_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                subject    = excluded.subject,
                body       = excluded.body,
@@ -777,10 +788,51 @@ impl Database {
                end_at     = excluded.end_at,
                is_all_day = excluded.is_all_day,
                time_zone  = excluded.time_zone,
+               event_type = excluded.event_type,
+               series_master_id = excluded.series_master_id,
                cached_at  = CURRENT_TIMESTAMP",
-            params![ev.id, ev.subject, ev.body, ev.start, ev.end, ev.is_all_day, ev.time_zone, self.account_id],
+            params![
+                ev.id, ev.subject, ev.body, ev.start, ev.end, ev.is_all_day, ev.time_zone, self.account_id,
+                if ev.event_type.is_empty() { "singleInstance" } else { ev.event_type.as_str() },
+                ev.series_master_id,
+            ],
         )?;
         Ok(())
+    }
+
+    /// Store the result of expanding a date window ([from, to), "YYYY-MM-DDT00:00:00" bounds).
+    /// Recurring occurrences/exceptions previously stored inside the window are replaced, so an
+    /// occurrence that was cancelled or moved at the server disappears locally. Single events
+    /// returned alongside are upserted as usual. Call only with a COMPLETE fetch of the window.
+    pub fn replace_occurrences(&self, from: &str, to: &str, events: &[CalendarEvent]) -> Result<usize> {
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> Result<usize> {
+            self.conn.execute(
+                "DELETE FROM calendar_events
+                 WHERE account_id = ?1 AND event_type IN ('occurrence', 'exception')
+                   AND start_at >= ?2 AND start_at < ?3",
+                params![self.account_id, from, to],
+            )?;
+            for ev in events {
+                self.upsert_event(ev)?;
+            }
+            Ok(events.len())
+        })();
+        match result {
+            Ok(n) => { self.conn.execute_batch("COMMIT")?; Ok(n) }
+            Err(e) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(e) }
+        }
+    }
+
+    /// Drop recurring occurrences outside `[from, to)` (used when the occurrence window is narrowed).
+    pub fn purge_occurrences_outside(&self, from: &str, to: &str) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM calendar_events
+             WHERE account_id = ?1 AND event_type IN ('occurrence', 'exception')
+               AND (start_at < ?2 OR start_at >= ?3)",
+            params![self.account_id, from, to],
+        )?;
+        Ok(n)
     }
 
     /// Events overlapping the given month ("YYYY-MM"), ordered by start
@@ -792,9 +844,9 @@ impl Database {
         let to = format!("{:04}-{:02}-01T00:00:00", ny, nm);
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, subject, body, start_at, end_at, is_all_day, COALESCE(time_zone, '')
+            "SELECT id, subject, body, start_at, end_at, is_all_day, COALESCE(time_zone, ''), event_type, series_master_id
              FROM calendar_events
-             WHERE start_at < ?2 AND end_at >= ?1
+             WHERE start_at < ?2 AND end_at >= ?1 AND event_type != 'seriesMaster'
              ORDER BY start_at ASC",
         )?;
         let events = stmt
@@ -807,6 +859,8 @@ impl Database {
                     end:        row.get(4)?,
                     is_all_day: row.get(5)?,
                     time_zone:  row.get(6)?,
+                    event_type: row.get(7)?,
+                    series_master_id: row.get(8)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -822,6 +876,7 @@ mod calendar_tests {
         CalendarEvent {
             id: id.into(), subject: subject.into(), body: "body".into(),
             start: start.into(), end: end.into(), is_all_day: false, time_zone: "America/New_York".into(),
+            ..Default::default()
         }
     }
 
@@ -843,6 +898,64 @@ mod calendar_tests {
         let oct = db.get_events_for_month("2026-10").unwrap();
         assert_eq!(oct.len(), 2);
         assert!(oct.iter().any(|e| e.subject == "Standup moved" && e.start.starts_with("2026-10-04")));
+    }
+}
+
+#[cfg(test)]
+mod recurrence_tests {
+    use super::*;
+
+    fn occ(id: &str, start: &str, kind: &str) -> CalendarEvent {
+        CalendarEvent {
+            id: id.into(), subject: "Standup".into(), start: start.into(),
+            end: format!("{}:30:00", &start[..start.len() - 6]),
+            time_zone: "UTC".into(), event_type: kind.into(), series_master_id: Some("M".into()), ..Default::default()
+        }
+    }
+
+    #[test]
+    fn series_masters_are_stored_but_never_displayed() {
+        let db = Database::open(":memory:").unwrap();
+        db.upsert_event(&occ("M", "2026-10-01T09:00:00", "seriesMaster")).unwrap();
+        db.upsert_event(&occ("o1", "2026-10-02T09:00:00", "occurrence")).unwrap();
+        let shown = db.get_events_for_month("2026-10").unwrap();
+        assert_eq!(shown.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec!["o1"]);
+    }
+
+    #[test]
+    fn resyncing_a_window_removes_cancelled_occurrences_and_keeps_other_windows() {
+        let db = Database::open(":memory:").unwrap();
+        let first = vec![occ("o1", "2026-10-05T09:00:00", "occurrence"), occ("o2", "2026-10-12T09:00:00", "occurrence"),
+                         occ("o3", "2026-10-19T09:00:00", "occurrence")];
+        db.replace_occurrences("2026-10-01T00:00:00", "2026-11-01T00:00:00", &first).unwrap();
+        db.upsert_event(&occ("far", "2026-12-07T09:00:00", "occurrence")).unwrap();     // outside the window
+        let single = CalendarEvent { id: "s".into(), subject: "One-off".into(), start: "2026-10-06T10:00:00".into(),
+            end: "2026-10-06T11:00:00".into(), ..Default::default() };
+        db.upsert_event(&single).unwrap();                                              // not an occurrence
+
+        // o2 was cancelled at the server, o3 moved
+        let second = vec![occ("o1", "2026-10-05T09:00:00", "occurrence"), occ("o3", "2026-10-20T09:00:00", "exception")];
+        db.replace_occurrences("2026-10-01T00:00:00", "2026-11-01T00:00:00", &second).unwrap();
+
+        let oct: Vec<_> = db.get_events_for_month("2026-10").unwrap().into_iter().map(|e| (e.id, e.start[..10].to_string())).collect();
+        assert_eq!(oct, vec![("o1".into(), "2026-10-05".into()), ("s".into(), "2026-10-06".into()), ("o3".into(), "2026-10-20".into())]);
+        assert_eq!(db.get_events_for_month("2026-12").unwrap().len(), 1, "other windows untouched");
+    }
+
+    #[test]
+    fn event_type_columns_are_added_to_an_existing_calendar_table() {
+        let path = std::env::temp_dir().join(format!("omarchylook-evtype-{}", std::process::id())).to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&path);
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch("CREATE TABLE calendar_events (id TEXT PRIMARY KEY, subject TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
+                start_at TEXT NOT NULL, end_at TEXT NOT NULL, is_all_day BOOLEAN DEFAULT 0, time_zone TEXT, cached_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+                INSERT INTO calendar_events (id, subject, start_at, end_at) VALUES ('e','old','2026-10-01T09:00:00','2026-10-01T10:00:00');").unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let e = &db.get_events_for_month("2026-10").unwrap()[0];
+        assert_eq!(e.event_type, "singleInstance");
+        let _ = std::fs::remove_file(&path);
     }
 }
 
@@ -927,7 +1040,7 @@ mod account_tests {
         }).unwrap();
         db.upsert_event(&CalendarEvent {
             id: "e1".into(), subject: "s".into(), body: "".into(), start: "2026-10-01T09:00:00".into(),
-            end: "2026-10-01T10:00:00".into(), is_all_day: false, time_zone: "UTC".into(),
+            end: "2026-10-01T10:00:00".into(), is_all_day: false, time_zone: "UTC".into(), ..Default::default()
         }).unwrap();
         let m: String = db.conn.query_row("SELECT account_id FROM messages WHERE id='m1'", [], |r| r.get(0)).unwrap();
         let e: String = db.conn.query_row("SELECT account_id FROM calendar_events WHERE id='e1'", [], |r| r.get(0)).unwrap();
@@ -978,7 +1091,7 @@ mod account_tests {
     fn delete_account_removes_only_its_data() {
         let a = Database::open_for_account(":memory:", "gmail-aaaaaa").unwrap();
         let ev = |id: &str| CalendarEvent { id: id.into(), subject: "s".into(), body: "".into(), start: "2026-10-01T09:00:00".into(),
-            end: "2026-10-01T10:00:00".into(), is_all_day: false, time_zone: "UTC".into() };
+            end: "2026-10-01T10:00:00".into(), is_all_day: false, time_zone: "UTC".into(), ..Default::default() };
         a.upsert_event(&ev("e1")).unwrap();
         a.conn.execute("INSERT INTO calendar_events (id, subject, start_at, end_at, account_id) VALUES ('e2','s','2026-10-01T09:00:00','2026-10-01T10:00:00','gmail-bbbbbb')", []).unwrap();
         a.delete_account("gmail-aaaaaa").unwrap();

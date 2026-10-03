@@ -99,7 +99,8 @@ function onDay(norm, day) {
     }
     out.sort(function(a, b) {
         if (a.allDay !== b.allDay) return a.allDay ? -1 : 1
-        return a.startMin - b.startMin
+        if (a.startMin !== b.startMin) return a.startMin - b.startMin
+        return a.title < b.title ? -1 : (a.title > b.title ? 1 : 0)   // stable order for same-time events
     })
     return out
 }

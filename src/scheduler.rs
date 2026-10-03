@@ -28,12 +28,17 @@ pub fn is_supported(provider: &str) -> bool {
 
 pub struct SyncScheduler {
     db_path: PathBuf,
+    settings_path: PathBuf,
     running: Mutex<HashMap<String, Vec<Arc<Notify>>>>,
 }
 
 impl SyncScheduler {
     pub fn new(config_dir: &std::path::Path) -> Self {
-        Self { db_path: config_dir.join("messages.db"), running: Mutex::new(HashMap::new()) }
+        Self {
+            db_path: config_dir.join("messages.db"),
+            settings_path: config_dir.join("settings.toml"),
+            running: Mutex::new(HashMap::new()),
+        }
     }
 
     fn db_str(&self) -> String {
@@ -97,14 +102,15 @@ impl SyncScheduler {
             EmailDaemon::new(cfg, db, provider).start().await;
         });
 
-        let (id, path) = (account_id.to_string(), self.db_str());
+        let (id, path, settings_path) = (account_id.to_string(), self.db_str(), self.settings_path.clone());
         spawn_sync_thread(format!("cal-{}", account_id), cal_stop.clone(), move || async move {
             let provider = Arc::new(GraphCalendarProvider::new(AuthManager::for_account(&id)));
             let db = match Database::open_for_account(&path, &id) {
                 Ok(db) => Arc::new(db),
                 Err(e) => return error!("Calendar sync {}: cannot open database: {}", id, e),
             };
-            CalendarDaemon::new(CalendarDaemonConfig::default(), db, provider).start().await;
+            let cfg = CalendarDaemonConfig { settings_path: Some(settings_path), ..CalendarDaemonConfig::default() };
+            CalendarDaemon::new(cfg, db, provider).start().await;
         });
 
         let (id, path) = (account_id.to_string(), self.db_str());

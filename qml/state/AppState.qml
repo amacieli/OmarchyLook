@@ -14,6 +14,7 @@ Item {
     return (d && d.length > 0) ? d : Quickshell.env("HOME") + "/.config/omarchylook"
   }
   property bool backendOnline: false
+  onBackendOnlineChanged: if (backendOnline) loadCalendarSettings()
   // Calendar view chosen in the calendar dropdown: day | workweek | week | month
   property string calendarMode: "month"
   // People view dropdowns: all | favorites | lists   and   first | last | company | recent
@@ -90,6 +91,46 @@ Item {
       if (isAuthenticated) { root.loadFolders(); root.loadMessages() }
       root.loadAccounts()
     }
+  }
+
+  // Settings → Calendar: how far recurring meetings are expanded (whole years either side of
+  // today). Owned by the backend (settings.toml); the daemon applies changes on its next cycle.
+  property int recurrenceYearsBack: 5
+  property int recurrenceYearsAhead: 10
+  property int maxYearsBack: 20
+  property int maxYearsAhead: 30
+
+  function applyCalendarSettings(data) {
+    recurrenceYearsBack = data.recurrence_years_back
+    recurrenceYearsAhead = data.recurrence_years_ahead
+    if (data.max_years_back) maxYearsBack = data.max_years_back
+    if (data.max_years_ahead) maxYearsAhead = data.max_years_ahead
+  }
+
+  function loadCalendarSettings() {
+    request("GET", "/settings/calendar", function(xhr) {
+      if (xhr.status !== 200) return
+      try { applyCalendarSettings(JSON.parse(xhr.responseText)) } catch (e) { console.log("[CalendarSettings] parse error:", e) }
+    })
+  }
+
+  // Called on every stepper change; the actual save is debounced so rapid clicks send one request.
+  function setRecurrenceWindow(back, ahead) {
+    recurrenceYearsBack = back
+    recurrenceYearsAhead = ahead
+    calendarSettingsSave.restart()
+  }
+
+  Timer {
+    id: calendarSettingsSave
+    interval: 600
+    onTriggered: root.request("POST",
+      "/settings/calendar?back=" + root.recurrenceYearsBack + "&ahead=" + root.recurrenceYearsAhead,
+      function(xhr) {
+        if (xhr.status !== 200) return
+        // the backend clamps; show what was actually stored
+        try { root.applyCalendarSettings(JSON.parse(xhr.responseText)) } catch (e) {}
+      })
   }
 
   // Signed-in accounts for Settings → Accounts: [{ id, provider, email, signed_in }]

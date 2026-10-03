@@ -89,7 +89,7 @@ pub struct EmailMessage {
 
 /// Calendar event for daemon storage (start/end are local wall-clock
 /// "YYYY-MM-DDTHH:MM:SS" strings in `time_zone`)
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CalendarEvent {
     pub id: String,
     pub subject: String,
@@ -98,6 +98,11 @@ pub struct CalendarEvent {
     pub end: String,
     pub is_all_day: bool,
     pub time_zone: String,
+    /// Graph event type: singleInstance | occurrence | exception | seriesMaster
+    /// (empty is treated as singleInstance). Series masters are stored but never displayed:
+    /// their occurrences are.
+    pub event_type: String,
+    pub series_master_id: Option<String>,
 }
 
 /// Phone number with its type ("mobile", "home", "work")
@@ -181,6 +186,41 @@ pub struct Settings {
     pub color: ColorSettings,
     pub ui: UiSettings,
     pub sync: SyncSettings,
+    /// Absent in settings files written before this section existed.
+    #[serde(default)]
+    pub calendar: CalendarSettings,
+}
+
+/// How far recurring meetings are expanded into individual occurrences, in whole years
+/// either side of today (Settings → Calendar).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct CalendarSettings {
+    #[serde(default = "CalendarSettings::default_back")]
+    pub recurrence_years_back: i32,
+    #[serde(default = "CalendarSettings::default_ahead")]
+    pub recurrence_years_ahead: i32,
+}
+
+impl CalendarSettings {
+    pub const MAX_YEARS_BACK: i32 = 20;
+    pub const MAX_YEARS_AHEAD: i32 = 30;
+
+    fn default_back() -> i32 { 5 }
+    fn default_ahead() -> i32 { 10 }
+
+    /// Clamp to the supported range (0..=20 back, 1..=30 ahead).
+    pub fn sanitized(&self) -> Self {
+        Self {
+            recurrence_years_back: self.recurrence_years_back.clamp(0, Self::MAX_YEARS_BACK),
+            recurrence_years_ahead: self.recurrence_years_ahead.clamp(1, Self::MAX_YEARS_AHEAD),
+        }
+    }
+}
+
+impl Default for CalendarSettings {
+    fn default() -> Self {
+        Self { recurrence_years_back: Self::default_back(), recurrence_years_ahead: Self::default_ahead() }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -262,6 +302,7 @@ impl Default for Settings {
                 auto_sync: true,
                 cache_retention_days: 30,
             },
+            calendar: CalendarSettings::default(),
         }
     }
 }

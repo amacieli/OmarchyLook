@@ -106,7 +106,7 @@ RowLayout {
     }
   }
   Component { id: mailPage;          MailPage {} }
-  Component { id: calendarPage;      CalendarPage {} }
+  Component { id: calendarPage;      CalendarPage { app: root.app } }
   Component { id: notificationsPage; NotificationsPage {} }
   Component {
     id: aboutPage
