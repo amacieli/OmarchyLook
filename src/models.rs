@@ -100,6 +100,17 @@ pub struct CalendarEvent {
     pub time_zone: String,
 }
 
+/// A configured mail/calendar account (see `accounts.rs` for the id scheme)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Account {
+    pub id: String,
+    pub provider: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    /// Non-secret provider settings as JSON (e.g. IMAP host/port). Secrets live in the keyring.
+    pub config: String,
+}
+
 /// Cached mail entry in SQLite
 #[derive(Debug, Clone)]
 pub struct CachedMessage {

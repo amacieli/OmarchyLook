@@ -1,28 +1,44 @@
 //! SQLite database with FTS5 for local mail cache
 
 use crate::errors::{OmarchyError, Result};
-use crate::models::{CachedMessage, CalendarEvent, EmailMessage, MailFolder, Message};
+use crate::accounts;
+use crate::models::{Account, CachedMessage, CalendarEvent, EmailMessage, MailFolder, Message};
+use crate::token_store::DEFAULT_ACCOUNT;
 use log::{debug, info};
 use rusqlite::{Connection, params, OptionalExtension};
 use chrono::Utc;
 
 pub struct Database {
     conn: Connection,
+    /// Account that rows written through this handle belong to.
+    account_id: String,
 }
 
 impl Database {
     /// Open or create database at the given path
     pub fn open(path: &str) -> Result<Self> {
-        debug!("Opening database at: {}", path);
+        Self::open_for_account(path, DEFAULT_ACCOUNT)
+    }
+
+    /// Open the database; rows written through this handle are stamped with `account_id`.
+    /// `open()` uses the legacy single account (`exchange-primary`) until the
+    /// per-account sync scheduler lands.
+    pub fn open_for_account(path: &str, account_id: &str) -> Result<Self> {
+        debug!("Opening database at: {} (account {})", path, account_id);
         
         let conn = Connection::open(path)
             .map_err(|e| OmarchyError::DatabaseError(e))?;
         
-        let db = Self { conn };
+        let db = Self { conn, account_id: account_id.to_string() };
         db.init_schema()?;
+        db.ensure_account_row(account_id)?;
         info!("Database initialized");
         
         Ok(db)
+    }
+
+    pub fn account_id(&self) -> &str {
+        &self.account_id
     }
     
     /// Initialize schema with FTS5 for full-text search
@@ -66,15 +82,7 @@ impl Database {
             [],
         )?;
         
-        self.conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-                INSERT INTO messages_fts(messages_fts, id, subject, from_email, from_name, body)
-                VALUES('delete', old.id, old.subject, old.from_email, old.from_name, old.body);
-                INSERT INTO messages_fts(id, subject, from_email, from_name, body)
-                VALUES (new.id, new.subject, new.from_email, new.from_name, new.body);
-            END",
-            [],
-        )?;
+        self.create_messages_au_trigger()?;
         
         self.conn.execute(
             "CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
@@ -133,9 +141,173 @@ impl Database {
             [],
         )?;
 
+        self.init_accounts_schema()?;
+
         Ok(())
     }
     
+    /// FTS sync trigger for message updates (unchanged definition; factored out so the
+    /// account backfill can suspend it inside its transaction).
+    fn create_messages_au_trigger(&self) -> Result<()> {
+        self.conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, id, subject, from_email, from_name, body)
+                VALUES('delete', old.id, old.subject, old.from_email, old.from_name, old.body);
+                INSERT INTO messages_fts(id, subject, from_email, from_name, body)
+                VALUES (new.id, new.subject, new.from_email, new.from_name, new.body);
+            END",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Accounts table + `account_id` on every synced table. Rows that predate
+    /// multi-account support are assigned to the legacy account.
+    fn init_accounts_schema(&self) -> Result<()> {
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS accounts (
+                id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                email TEXT,
+                display_name TEXT,
+                config TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(provider, email)
+            )",
+            [],
+        )?;
+
+        let mut backfill_needed = false;
+        for table in ["messages", "folders", "calendar_events"] {
+            let has_col: bool = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name='account_id'",
+                params![table],
+                |row| row.get::<_, i32>(0),
+            ).unwrap_or(0) > 0;
+            if !has_col {
+                self.conn.execute(&format!("ALTER TABLE {} ADD COLUMN account_id TEXT", table), [])?;
+            }
+            self.conn.execute(
+                &format!("CREATE INDEX IF NOT EXISTS idx_{}_account ON {}(account_id)", table, table),
+                [],
+            )?;
+            if self.conn.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM {} WHERE account_id IS NULL)", table),
+                [],
+                |row| row.get::<_, bool>(0),
+            )? {
+                backfill_needed = true;
+            }
+        }
+
+        if backfill_needed {
+            // One transaction: either every table is assigned or none is.
+            self.conn.execute_batch("BEGIN")?;
+            let result = (|| -> Result<()> {
+                self.ensure_account_row(DEFAULT_ACCOUNT)?;
+                // account_id is not indexed text, so the FTS update trigger would only churn
+                // the full-text index for every row; suspend it for this transaction.
+                // (DDL is transactional: a rollback restores the trigger.)
+                self.conn.execute("DROP TRIGGER IF EXISTS messages_au", [])?;
+                for table in ["messages", "folders", "calendar_events"] {
+                    let n = self.conn.execute(
+                        &format!("UPDATE {} SET account_id = ?1 WHERE account_id IS NULL", table),
+                        params![DEFAULT_ACCOUNT],
+                    )?;
+                    info!("Assigned {} existing {} rows to account {}", n, table, DEFAULT_ACCOUNT);
+                }
+                self.create_messages_au_trigger()?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => self.conn.execute_batch("COMMIT")?,
+                Err(e) => {
+                    let _ = self.conn.execute_batch("ROLLBACK");
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Insert a bare account row if missing (provider derived from the id prefix).
+    fn ensure_account_row(&self, account_id: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO accounts (id, provider) VALUES (?1, ?2)",
+            params![account_id, accounts::provider_of(account_id)],
+        )?;
+        Ok(())
+    }
+
+    /// Create an account with a freshly generated `<provider>-<suffix>` id.
+    /// Fails if the same mailbox (provider + email) is already added.
+    pub fn create_account(&self, provider: &str, email: Option<&str>, display_name: Option<&str>, config: &str) -> Result<Account> {
+        let provider = accounts::provider_slug(provider);
+        if let Some(email) = email {
+            let dup: bool = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM accounts WHERE provider = ?1 AND lower(email) = lower(?2))",
+                params![provider, email],
+                |row| row.get(0),
+            )?;
+            if dup {
+                return Err(OmarchyError::SettingsError(format!("{} account {} is already added", provider, email)));
+            }
+        }
+        for _ in 0..16 {
+            let id = accounts::new_account_id(&provider);
+            let inserted = self.conn.execute(
+                "INSERT OR IGNORE INTO accounts (id, provider, email, display_name, config) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, provider, email, display_name, config],
+            )?;
+            if inserted == 1 {
+                return Ok(Account {
+                    id, provider,
+                    email: email.map(|s| s.to_string()),
+                    display_name: display_name.map(|s| s.to_string()),
+                    config: config.to_string(),
+                });
+            }
+        }
+        Err(OmarchyError::SettingsError("could not generate a unique account id".into()))
+    }
+
+    pub fn list_accounts(&self) -> Result<Vec<Account>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, provider, email, display_name, config FROM accounts ORDER BY created_at, id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(Account {
+                    id: row.get(0)?, provider: row.get(1)?, email: row.get(2)?,
+                    display_name: row.get(3)?, config: row.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn set_account_email(&self, account_id: &str, email: &str) -> Result<()> {
+        self.conn.execute("UPDATE accounts SET email = ?1 WHERE id = ?2", params![email, account_id])?;
+        Ok(())
+    }
+
+    /// Remove an account and everything synced for it (mail, folders, events).
+    /// Tokens live in the keyring and are removed by the token broker.
+    pub fn delete_account(&self, account_id: &str) -> Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> Result<()> {
+            for table in ["messages", "folders", "calendar_events"] {
+                self.conn.execute(&format!("DELETE FROM {} WHERE account_id = ?1", table), params![account_id])?;
+            }
+            self.conn.execute("DELETE FROM accounts WHERE id = ?1", params![account_id])?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => { self.conn.execute_batch("COMMIT")?; Ok(()) }
+            Err(e) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(e) }
+        }
+    }
+
     /// Cache a message from Graph API
     pub fn cache_message(&self, msg: &Message) -> Result<()> {
         let from_email = msg.from.as_ref()
@@ -159,8 +331,8 @@ impl Database {
         // debug!("Caching message: {}", msg.id);
         
         self.conn.execute(
-            "INSERT OR REPLACE INTO messages (id, subject, from_email, from_name, body, received_at, is_read)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO messages (id, subject, from_email, from_name, body, received_at, is_read, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 msg.id,
                 msg.subject,
@@ -169,6 +341,7 @@ impl Database {
                 body,
                 received_at,
                 msg.is_read.unwrap_or(false),
+                self.account_id,
             ],
         )?;
         
@@ -304,8 +477,8 @@ impl Database {
         // debug!("Inserting email: {}", email.id);
 
         self.conn.execute(
-            "INSERT OR IGNORE INTO messages (id, subject, from_email, body, received_at, is_read, cached_at, folder_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT OR IGNORE INTO messages (id, subject, from_email, body, received_at, is_read, cached_at, folder_id, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 email.id,
                 email.subject,
@@ -315,6 +488,7 @@ impl Database {
                 false, // new emails default to unread
                 now,
                 email.folder_id,
+                self.account_id,
             ],
         )?;
 
@@ -343,8 +517,8 @@ impl Database {
         };
 
         self.conn.execute(
-            "INSERT INTO folders (id, display_name, parent_folder_id, unread_item_count, total_item_count, well_known_name, sort_order, cached_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
+            "INSERT INTO folders (id, display_name, parent_folder_id, unread_item_count, total_item_count, well_known_name, sort_order, cached_at, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP, ?8)
              ON CONFLICT(id) DO UPDATE SET
                display_name      = excluded.display_name,
                unread_item_count = excluded.unread_item_count,
@@ -359,6 +533,7 @@ impl Database {
                 folder.total_item_count,
                 folder.well_known_name,
                 sort_order,
+                self.account_id,
             ],
         )?;
         Ok(())
@@ -421,8 +596,8 @@ impl Database {
     /// Insert or update a calendar event (updates so reschedules/edits propagate)
     pub fn upsert_event(&self, ev: &CalendarEvent) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO calendar_events (id, subject, body, start_at, end_at, is_all_day, time_zone, cached_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
+            "INSERT INTO calendar_events (id, subject, body, start_at, end_at, is_all_day, time_zone, cached_at, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP, ?8)
              ON CONFLICT(id) DO UPDATE SET
                subject    = excluded.subject,
                body       = excluded.body,
@@ -431,7 +606,7 @@ impl Database {
                is_all_day = excluded.is_all_day,
                time_zone  = excluded.time_zone,
                cached_at  = CURRENT_TIMESTAMP",
-            params![ev.id, ev.subject, ev.body, ev.start, ev.end, ev.is_all_day, ev.time_zone],
+            params![ev.id, ev.subject, ev.body, ev.start, ev.end, ev.is_all_day, ev.time_zone, self.account_id],
         )?;
         Ok(())
     }
@@ -496,5 +671,141 @@ mod calendar_tests {
         let oct = db.get_events_for_month("2026-10").unwrap();
         assert_eq!(oct.len(), 2);
         assert!(oct.iter().any(|e| e.subject == "Standup moved" && e.start.starts_with("2026-10-04")));
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+
+    fn temp_db_path(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("omarchylook-test-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_file(&dir);
+        dir.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn create_account_generates_pattern_ids_even_for_first_account() {
+        let db = Database::open_for_account(":memory:", "exchange-aaaaaa").unwrap();
+        let a = db.create_account("Exchange", Some("a@x.com"), None, "{}").unwrap();
+        let b = db.create_account("exchange", Some("b@x.com"), None, "{}").unwrap();
+        for acc in [&a, &b] {
+            assert!(acc.id.starts_with("exchange-") && acc.id != DEFAULT_ACCOUNT, "{}", acc.id);
+            assert_eq!(acc.id.len(), "exchange-".len() + 6);
+        }
+        assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn duplicate_mailbox_is_rejected_case_insensitively() {
+        let db = Database::open(":memory:").unwrap();
+        db.create_account("gmail", Some("Me@Gmail.com"), None, "{}").unwrap();
+        assert!(db.create_account("gmail", Some("me@gmail.com"), None, "{}").is_err());
+        // same address on another provider type is a different account
+        assert!(db.create_account("outlook", Some("me@gmail.com"), None, "{}").is_ok());
+    }
+
+    #[test]
+    fn writes_are_stamped_with_the_handle_account() {
+        let db = Database::open_for_account(":memory:", "gmail-123abc").unwrap();
+        db.insert_email(&EmailMessage {
+            id: "m1".into(), from: "x@y".into(), subject: "s".into(), received: "2026-10-01T00:00:00Z".into(),
+            body: "b".into(), folder_id: Some("f".into()),
+        }).unwrap();
+        db.upsert_event(&CalendarEvent {
+            id: "e1".into(), subject: "s".into(), body: "".into(), start: "2026-10-01T09:00:00".into(),
+            end: "2026-10-01T10:00:00".into(), is_all_day: false, time_zone: "UTC".into(),
+        }).unwrap();
+        let m: String = db.conn.query_row("SELECT account_id FROM messages WHERE id='m1'", [], |r| r.get(0)).unwrap();
+        let e: String = db.conn.query_row("SELECT account_id FROM calendar_events WHERE id='e1'", [], |r| r.get(0)).unwrap();
+        assert_eq!((m.as_str(), e.as_str()), ("gmail-123abc", "gmail-123abc"));
+    }
+
+    #[test]
+    fn existing_rows_are_backfilled_to_the_legacy_account() {
+        // Build a pre-multi-account database (no accounts table, no account_id).
+        let path = temp_db_path("backfill");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE messages (id TEXT PRIMARY KEY, subject TEXT NOT NULL, from_email TEXT NOT NULL, from_name TEXT,
+                    body TEXT NOT NULL, received_at DATETIME NOT NULL, is_read BOOLEAN DEFAULT 0,
+                    cached_at DATETIME DEFAULT CURRENT_TIMESTAMP, folder_id TEXT);
+                 CREATE TABLE folders (id TEXT PRIMARY KEY, display_name TEXT NOT NULL, parent_folder_id TEXT,
+                    unread_item_count INTEGER DEFAULT 0, total_item_count INTEGER DEFAULT 0, well_known_name TEXT,
+                    sort_order INTEGER DEFAULT 999, cached_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+                 CREATE TABLE calendar_events (id TEXT PRIMARY KEY, subject TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
+                    start_at TEXT NOT NULL, end_at TEXT NOT NULL, is_all_day BOOLEAN DEFAULT 0, time_zone TEXT,
+                    cached_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+                 INSERT INTO messages (id, subject, from_email, body, received_at) VALUES ('m1','s','a@b','x','2026-01-01'),('m2','s','a@b','x','2026-01-02');
+                 INSERT INTO folders (id, display_name) VALUES ('f1','Inbox');
+                 INSERT INTO calendar_events (id, subject, start_at, end_at) VALUES ('e1','s','2026-01-01T09:00:00','2026-01-01T10:00:00');",
+            ).unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        for (table, n) in [("messages", 2), ("folders", 1), ("calendar_events", 1)] {
+            let c: i32 = db.conn.query_row(&format!("SELECT COUNT(*) FROM {} WHERE account_id = 'exchange-primary'", table), [], |r| r.get(0)).unwrap();
+            let nulls: i32 = db.conn.query_row(&format!("SELECT COUNT(*) FROM {} WHERE account_id IS NULL", table), [], |r| r.get(0)).unwrap();
+            assert_eq!((c, nulls), (n, 0), "{}", table);
+        }
+        let trig: i32 = db.conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='messages_au'", [], |r| r.get(0)).unwrap();
+        assert_eq!(trig, 1, "FTS update trigger must be restored after backfill");
+        let accts = db.list_accounts().unwrap();
+        assert_eq!(accts.len(), 1);
+        assert_eq!((accts[0].id.as_str(), accts[0].provider.as_str()), ("exchange-primary", "exchange"));
+
+        // Re-opening is idempotent.
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.list_accounts().unwrap().len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn delete_account_removes_only_its_data() {
+        let a = Database::open_for_account(":memory:", "gmail-aaaaaa").unwrap();
+        let ev = |id: &str| CalendarEvent { id: id.into(), subject: "s".into(), body: "".into(), start: "2026-10-01T09:00:00".into(),
+            end: "2026-10-01T10:00:00".into(), is_all_day: false, time_zone: "UTC".into() };
+        a.upsert_event(&ev("e1")).unwrap();
+        a.conn.execute("INSERT INTO calendar_events (id, subject, start_at, end_at, account_id) VALUES ('e2','s','2026-10-01T09:00:00','2026-10-01T10:00:00','gmail-bbbbbb')", []).unwrap();
+        a.delete_account("gmail-aaaaaa").unwrap();
+        let left: Vec<String> = a.conn.prepare("SELECT id FROM calendar_events").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().filter_map(|r| r.ok()).collect();
+        assert_eq!(left, vec!["e2"]);
+        assert!(a.list_accounts().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod real_db_copy {
+    use super::*;
+
+    /// Opens a COPY of a real database (path in OMARCHY_DB_COPY) and checks the account backfill.
+    /// Run with: OMARCHY_DB_COPY=/path/copy.db cargo test real_db_copy -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn backfill_on_copy_of_real_db() {
+        let path = std::env::var("OMARCHY_DB_COPY").expect("set OMARCHY_DB_COPY");
+        let before = Connection::open(&path).unwrap();
+        let counts = |c: &Connection| -> Vec<i64> {
+            ["messages", "folders", "calendar_events"].iter()
+                .map(|t| c.query_row(&format!("SELECT COUNT(*) FROM {}", t), [], |r| r.get(0)).unwrap()).collect()
+        };
+        let n_before = counts(&before);
+        drop(before);
+
+        let t = std::time::Instant::now();
+        let db = Database::open(&path).unwrap();
+        println!("open+backfill took {:?}", t.elapsed());
+
+        assert_eq!(counts(&db.conn), n_before, "row counts must not change");
+        for table in ["messages", "folders", "calendar_events"] {
+            let nulls: i64 = db.conn.query_row(&format!("SELECT COUNT(*) FROM {} WHERE account_id IS NULL", table), [], |r| r.get(0)).unwrap();
+            assert_eq!(nulls, 0, "{}", table);
+        }
+        println!("rows before/after: {:?}", n_before);
+        println!("accounts: {:?}", db.list_accounts().unwrap());
+        let fts: i64 = db.conn.query_row("SELECT COUNT(*) FROM messages_fts", [], |r| r.get(0)).unwrap();
+        println!("messages_fts rows: {}", fts);
     }
 }

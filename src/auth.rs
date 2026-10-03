@@ -1,9 +1,12 @@
 //! Authentication manager using Device Flow OAuth (Microsoft public client)
 
 use crate::errors::{OmarchyError, Result};
-use crate::models::{DeviceFlowResponse, TokenResponse, CachedToken};
+use crate::models::{DeviceFlowResponse, TokenResponse};
 use crate::keyring_mgr;
+use crate::token_store::{self, KeyringStore, RefreshOutcome, Refresher, TokenBroker, DEFAULT_ACCOUNT};
 use log::{info, debug, warn, error};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, Duration};
 
 // omarchylook Azure App Registration (multi-tenant + personal accounts)
@@ -15,18 +18,87 @@ const GRAPH_SCOPE: &str = "https://graph.microsoft.com/Mail.Read https://graph.m
 const DEVICE_AUTH_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
 
+/// Refreshes Microsoft tokens; classifies failures so the broker only wipes
+/// stored tokens when the grant is genuinely dead.
+struct MsRefresher;
+
+impl Refresher for MsRefresher {
+    fn refresh(&self, refresh_token: &str) -> RefreshOutcome {
+        let params = [
+            ("grant_type", "refresh_token"),
+            ("client_id", PUBLIC_CLIENT_ID),
+            ("refresh_token", refresh_token),
+            ("scope", GRAPH_SCOPE),
+        ];
+        match ureq::post(TOKEN_URL).send_form(&params) {
+            Ok(resp) => match resp.into_json::<TokenResponse>() {
+                Ok(t) => RefreshOutcome::Ok(t),
+                Err(e) => RefreshOutcome::Transient(format!("bad token response: {}", e)),
+            },
+            Err(ureq::Error::Status(code, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                let err = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v["error"].as_str().map(|s| s.to_string()))
+                    .unwrap_or_default();
+                match err.as_str() {
+                    "invalid_grant" | "interaction_required" | "consent_required" => {
+                        RefreshOutcome::InvalidGrant(format!("{}: {}", code, err))
+                    }
+                    _ => RefreshOutcome::Transient(format!("HTTP {}: {}", code, body)),
+                }
+            }
+            Err(e) => RefreshOutcome::Transient(e.to_string()),
+        }
+    }
+}
+
+/// Process-wide broker per account, so every daemon / handler shares one
+/// in-memory token cache and one refresh at a time.
+pub fn broker_for(account_id: &str) -> Arc<TokenBroker> {
+    static BROKERS: OnceLock<Mutex<HashMap<String, Arc<TokenBroker>>>> = OnceLock::new();
+    let map = BROKERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = map.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(b) = map.get(account_id) {
+        return Arc::clone(b);
+    }
+
+    let store = Arc::new(KeyringStore);
+    if account_id == DEFAULT_ACCOUNT {
+        // Pre-multi-account installs kept one token under `auth_cache`.
+        if let Err(e) = token_store::migrate_legacy(
+            &*store,
+            account_id,
+            keyring_mgr::get_cached_token,
+            keyring_mgr::clear_cache,
+        ) {
+            warn!("Legacy token migration failed (legacy entry kept): {}", e);
+        }
+    }
+    let broker = Arc::new(TokenBroker::new(account_id, store, Arc::new(MsRefresher)));
+    map.insert(account_id.to_string(), Arc::clone(&broker));
+    broker
+}
+
 pub struct AuthManager {
     pub access_token: Option<String>,
     pub refresh_token: Option<String>,
     token_expires_at: Option<SystemTime>,
+    broker: Arc<TokenBroker>,
 }
 
 impl AuthManager {
+    /// Manager for the default (legacy single) account.
     pub fn new() -> Self {
+        Self::for_account(DEFAULT_ACCOUNT)
+    }
+
+    pub fn for_account(account_id: &str) -> Self {
         Self {
             access_token: None,
             refresh_token: None,
             token_expires_at: None,
+            broker: broker_for(account_id),
         }
     }
     
@@ -207,74 +279,17 @@ impl AuthManager {
         }
     }
     
-    /// Get a valid access token (refresh if needed)
+    /// Get a valid access token (refreshed through the shared broker if needed)
     pub fn get_token(&mut self) -> Result<String> {
-        // Check if cached token is still valid
-        if let Some(token) = &self.access_token {
-            if let Some(expires) = self.token_expires_at {
-                if SystemTime::now() < expires - Duration::from_secs(60) {
-                    // Token still valid (with 60-second buffer)
-                    return Ok(token.clone());
-                }
-            }
-        }
-        
-        // Try to refresh from cache
-        self.acquire_token_silent()?;
-        
-        match &self.access_token {
-            Some(token) => Ok(token.clone()),
-            None => Err(OmarchyError::TokenError("No valid token available".to_string())),
-        }
+        let token = self.broker.get_token()?;
+        self.access_token = Some(token.clone());
+        self.token_expires_at = self.broker.expires_at();
+        Ok(token)
     }
     
-    /// Refresh token silently from cached refresh token
-    fn acquire_token_silent(&mut self) -> Result<()> {
-        // Try to get cached refresh token
-        if let Some(cached_json) = keyring_mgr::get_cached_token()? {
-            if let Ok(cached) = serde_json::from_str::<CachedToken>(&cached_json) {
-                if let Some(refresh_token) = cached.refresh_token {
-                    debug!("Attempting silent token refresh...");
-                    
-                    let params = [
-                        ("grant_type", "refresh_token"),
-                        ("client_id", PUBLIC_CLIENT_ID),
-                        ("refresh_token", &refresh_token),
-                        ("scope", GRAPH_SCOPE),
-                    ];
-                    
-                    match ureq::post(TOKEN_URL).send_form(&params) {
-                        Ok(resp) if resp.status() == 200 => {
-                            if let Ok(token_data) = resp.into_json::<TokenResponse>() {
-                                debug!("Token refreshed silently");
-                                self.cache_tokens(&token_data)?;
-                                self.access_token = Some(token_data.access_token);
-                                self.refresh_token = token_data.refresh_token;
-                                self.token_expires_at = Some(SystemTime::now() + Duration::from_secs(token_data.expires_in as u64));
-                                return Ok(());
-                            }
-                        }
-                        _ => {
-                            warn!("Silent token refresh failed; clearing cache");
-                            let _ = keyring_mgr::clear_cache();
-                        }
-                    }
-                }
-            }
-        }
-        
-        Ok(())
-    }
-    
-    /// Check if user is authenticated (has cached tokens)
+    /// Check if user is authenticated (has stored credentials; no network)
     pub fn is_authenticated(&self) -> bool {
-        // A valid access_token (or refresh_token for silent renewal) counts as authenticated
-        if let Ok(Some(cached_json)) = keyring_mgr::get_cached_token() {
-            if let Ok(cached) = serde_json::from_str::<CachedToken>(&cached_json) {
-                return cached.refresh_token.is_some() || !cached.access_token.is_empty();
-            }
-        }
-        false
+        self.broker.is_authenticated()
     }
     
     /// Trigger device flow (can be called from external signal)
@@ -294,7 +309,9 @@ impl AuthManager {
         self.access_token = None;
         self.refresh_token = None;
         self.token_expires_at = None;
-        keyring_mgr::clear_cache()?;
+        self.broker.sign_out()?;
+        // Drop any leftover pre-multi-account entry so it can't resurrect the login.
+        let _ = keyring_mgr::clear_cache();
         info!("Logout successful");
         Ok(())
     }
@@ -426,18 +443,10 @@ impl AuthManager {
         Ok(true)
     }
     
-    /// Cache tokens to keyring
+    /// Hand freshly issued tokens (device flow) to the broker, which persists them
     fn cache_tokens(&self, token_data: &TokenResponse) -> Result<()> {
-        let cached = CachedToken {
-            access_token: token_data.access_token.clone(),
-            refresh_token: token_data.refresh_token.clone(),
-        };
-        
-        let json = serde_json::to_string(&cached)
-            .map_err(|e| OmarchyError::JsonError(e))?;
-        
-        keyring_mgr::cache_token(&json)?;
-        debug!("Tokens cached to keyring");
+        self.broker.store_tokens(token_data)?;
+        debug!("Tokens stored for account {}", self.broker.account_id());
         Ok(())
     }
 }

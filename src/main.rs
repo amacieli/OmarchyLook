@@ -13,6 +13,24 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
+/// Email address of the signed-in account, resolved once via Graph `/me`
+/// (User.Read) and cached for GET /accounts. Cleared on sign-out.
+static ACCOUNT_EMAIL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static ACCOUNT_FETCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn fetch_account_email() -> Option<String> {
+    let token = AuthManager::new().get_token().ok()?;
+    let me: serde_json::Value = ureq::get("https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName")
+        .set("Authorization", &format!("Bearer {}", token))
+        .call()
+        .ok()?
+        .into_json()
+        .ok()?;
+    me["mail"].as_str().filter(|s| !s.is_empty())
+        .or_else(|| me["userPrincipalName"].as_str())
+        .map(|s| s.to_string())
+}
+
 /// Percent-decode a URL query parameter value (e.g. %3D → =, %2F → /)
 fn url_decode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -314,6 +332,38 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                             warn!("GET /folders: DB open failed: {}", e);
                             "[]".to_string()
                         }
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── GET /accounts — signed-in accounts (currently one Exchange account) ──
+                if first_line.contains("GET /accounts") {
+                    use std::sync::atomic::Ordering;
+                    let body = if AuthManager::new().is_authenticated() {
+                        let cached = ACCOUNT_EMAIL.lock().ok().and_then(|g| g.clone());
+                        if cached.is_none() && !ACCOUNT_FETCHING.swap(true, Ordering::SeqCst) {
+                            // Resolve off the HTTP thread; the UI re-polls while email is empty
+                            std::thread::spawn(|| {
+                                if let Some(email) = fetch_account_email() {
+                                    if let Ok(mut g) = ACCOUNT_EMAIL.lock() { *g = Some(email); }
+                                }
+                                ACCOUNT_FETCHING.store(false, Ordering::SeqCst);
+                            });
+                        }
+                        serde_json::to_string(&[serde_json::json!({
+                            "id": "exchange-primary",
+                            "provider": "exchange",
+                            "email": cached.unwrap_or_default(),
+                            "signed_in": true,
+                        })]).unwrap_or_else(|_| "[]".to_string())
+                    } else {
+                        if let Ok(mut g) = ACCOUNT_EMAIL.lock() { *g = None; }
+                        "[]".to_string()
                     };
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",

@@ -29,7 +29,7 @@ Item {
   ]
 
   readonly property var settingsCategories: [
-    { id: "account",       icon: "\uf007", label: "Account"       },
+    { id: "account",       icon: "\uf007", label: "Accounts"      },
     { id: "appearance",    icon: "\uf1fc", label: "Appearance"    },
     { id: "mail",          icon: "\uf0e0", label: "Mail"          },
     { id: "calendar",      icon: "\uf073", label: "Calendar"      },
@@ -84,7 +84,30 @@ Item {
     configDir: root.configDir
     onIsAuthenticatedChanged: {
       if (isAuthenticated) { root.loadFolders(); root.loadMessages() }
+      root.loadAccounts()
     }
+  }
+
+  // Signed-in accounts for Settings → Accounts: [{ id, provider, email, signed_in }]
+  property var accounts: []
+
+  function loadAccounts() {
+    request("GET", "/accounts", function(xhr) {
+      if (xhr.status !== 200) return
+      try {
+        var list = JSON.parse(xhr.responseText)
+        root.accounts = list
+        // The backend resolves the address asynchronously — re-poll until it's there
+        accountRetry.running = list.some(function(a) { return !a.email })
+      } catch (e) { console.log("[Accounts] parse error:", e) }
+    })
+  }
+
+  Timer {
+    id: accountRetry
+    interval: 2000
+    repeat: true
+    onTriggered: root.loadAccounts()
   }
 
   // --------------------------------------------------------- backend calls
