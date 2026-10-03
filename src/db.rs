@@ -31,7 +31,6 @@ impl Database {
         
         let db = Self { conn, account_id: account_id.to_string() };
         db.init_schema()?;
-        db.ensure_account_row(account_id)?;
         info!("Database initialized");
         
         Ok(db)
@@ -237,6 +236,25 @@ impl Database {
             params![account_id, accounts::provider_of(account_id)],
         )?;
         Ok(())
+    }
+
+    /// Register the pre-multi-account account (call only when its token exists).
+    pub fn ensure_legacy_account(&self) -> Result<()> {
+        self.ensure_account_row(DEFAULT_ACCOUNT)
+    }
+
+    /// Insert an account under a caller-chosen id (the id is generated before login
+    /// because tokens are stored under it). Fails on a duplicate id or mailbox.
+    pub fn insert_account(&self, id: &str, provider: &str, email: Option<&str>, display_name: Option<&str>, config: &str) -> Result<Account> {
+        self.conn.execute(
+            "INSERT INTO accounts (id, provider, email, display_name, config) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, provider, email, display_name, config],
+        )?;
+        Ok(Account {
+            id: id.to_string(), provider: provider.to_string(),
+            email: email.map(|s| s.to_string()), display_name: display_name.map(|s| s.to_string()),
+            config: config.to_string(),
+        })
     }
 
     /// Create an account with a freshly generated `<provider>-<suffix>` id.
@@ -703,6 +721,22 @@ mod account_tests {
         assert!(db.create_account("gmail", Some("me@gmail.com"), None, "{}").is_err());
         // same address on another provider type is a different account
         assert!(db.create_account("outlook", Some("me@gmail.com"), None, "{}").is_ok());
+    }
+
+    #[test]
+    fn open_does_not_invent_accounts() {
+        let db = Database::open(":memory:").unwrap();
+        assert!(db.list_accounts().unwrap().is_empty(), "fresh installs must not show a phantom account");
+        db.ensure_legacy_account().unwrap();
+        assert_eq!(db.list_accounts().unwrap()[0].id, "exchange-primary");
+    }
+
+    #[test]
+    fn insert_account_uses_given_id_and_rejects_duplicates() {
+        let db = Database::open(":memory:").unwrap();
+        db.insert_account("exchange-abc123", "exchange", Some("a@x.com"), None, "{}").unwrap();
+        assert!(db.insert_account("exchange-abc123", "exchange", Some("b@x.com"), None, "{}").is_err());
+        assert!(db.insert_account("exchange-def456", "exchange", Some("a@x.com"), None, "{}").is_err());
     }
 
     #[test]

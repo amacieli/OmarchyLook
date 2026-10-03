@@ -82,6 +82,7 @@ Item {
     id: authController
     backendUrl: root.backendUrl
     configDir: root.configDir
+    onAccountsChanged: root.loadAccounts()
     onIsAuthenticatedChanged: {
       if (isAuthenticated) { root.loadFolders(); root.loadMessages() }
       root.loadAccounts()

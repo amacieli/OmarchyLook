@@ -18,7 +18,12 @@ Item {
   property int secondsRemaining: 0
   property string errorMessage: ""
 
-  function startLogin() {
+  // Bumped by the backend after each completed login/sign-out (also while another
+  // account is already signed in, when isAuthenticated doesn't change).
+  property double loginSerial: 0
+  signal accountsChanged()
+
+  function startLogin(provider) {
     userCode = ""
     verificationUri = ""
     secondsRemaining = 0
@@ -31,13 +36,26 @@ Item {
       if (xhr.status === 200) codeFile.reload()
       else root.errorMessage = "Failed to start authentication (backend not ready?)"
     }
-    xhr.open("POST", root.backendUrl + "/auth/login")
+    xhr.open("POST", root.backendUrl + "/auth/login?provider=" + encodeURIComponent(provider || "exchange"))
     xhr.send()
   }
 
-  function logout() {
+  // Sign one account out (tokens removed, cached data kept).
+  function logout(accountId) {
+    postAccountAction("/auth/logout", accountId)
+  }
+
+  // Delete an account and everything cached for it.
+  function removeAccount(accountId) {
+    postAccountAction("/accounts/remove", accountId)
+  }
+
+  function postAccountAction(path, accountId) {
     var xhr = new XMLHttpRequest()
-    xhr.open("POST", root.backendUrl + "/auth/logout")
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState === XMLHttpRequest.DONE) root.accountsChanged()
+    }
+    xhr.open("POST", root.backendUrl + path + "?account=" + encodeURIComponent(accountId))
     xhr.send()
     // authFile watcher picks up the resulting state change.
   }
@@ -53,6 +71,14 @@ Item {
       var was = root.isAuthenticated
       root.isAuthenticated = data.is_authenticated === true
       if (data.error) root.errorMessage = data.error
+      var serial = data.login_serial || 0
+      if (serial !== root.loginSerial) {
+        root.loginSerial = serial
+        if (serial > 0) {
+          if (root.isAuthenticated && !data.error) { root.showModal = false; countdown.stop(); root.userCode = "" }
+          root.accountsChanged()
+        }
+      }
       if (!was && root.isAuthenticated) {
         root.showModal = false
         countdown.stop()

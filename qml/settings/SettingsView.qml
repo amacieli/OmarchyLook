@@ -14,8 +14,9 @@ RowLayout {
 
   required property var app
 
-  signal loginRequested()
-  signal logoutRequested()
+  signal loginRequested(string provider)
+  signal logoutRequested(string accountId)
+  signal removeRequested(string accountId)
 
   // True while the active page has an input that owns the keyboard.
   readonly property bool editing: pageLoader.item ? pageLoader.item.editing === true : false
@@ -90,8 +91,9 @@ RowLayout {
     AccountPage {
       accounts: root.app.accounts
       isAuthenticated: root.app.auth.isAuthenticated
-      onLoginRequested: root.loginRequested()
-      onLogoutRequested: root.logoutRequested()
+      onLoginRequested: function(provider) { root.loginRequested(provider) }
+      onLogoutRequested: function(accountId) { root.logoutRequested(accountId) }
+      onRemoveRequested: function(accountId) { root.removeRequested(accountId) }
     }
   }
   Component {

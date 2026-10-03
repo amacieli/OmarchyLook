@@ -53,17 +53,45 @@ impl Refresher for MsRefresher {
     }
 }
 
+#[cfg(test)]
+struct OfflineRefresher;
+#[cfg(test)]
+impl Refresher for OfflineRefresher {
+    fn refresh(&self, _refresh_token: &str) -> RefreshOutcome {
+        RefreshOutcome::Transient("network disabled in unit tests".into())
+    }
+}
+
 /// Process-wide broker per account, so every daemon / handler shares one
 /// in-memory token cache and one refresh at a time.
-pub fn broker_for(account_id: &str) -> Arc<TokenBroker> {
+fn brokers() -> &'static Mutex<HashMap<String, Arc<TokenBroker>>> {
     static BROKERS: OnceLock<Mutex<HashMap<String, Arc<TokenBroker>>>> = OnceLock::new();
-    let map = BROKERS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut map = map.lock().unwrap_or_else(|p| p.into_inner());
+    BROKERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// True when any account loaded in this process has credentials.
+pub fn any_account_authenticated() -> bool {
+    let list: Vec<Arc<TokenBroker>> =
+        brokers().lock().unwrap_or_else(|p| p.into_inner()).values().cloned().collect();
+    list.iter().any(|b| b.is_authenticated())
+}
+
+pub fn broker_for(account_id: &str) -> Arc<TokenBroker> {
+    let mut map = brokers().lock().unwrap_or_else(|p| p.into_inner());
     if let Some(b) = map.get(account_id) {
         return Arc::clone(b);
     }
 
-    let store = Arc::new(KeyringStore);
+    // Unit tests get an in-memory store and no network: they must never read, write or
+    // migrate the developer's real keyring (or crash the keyring daemon).
+    #[cfg(test)]
+    let (store, refresher): (Arc<dyn token_store::TokenStore>, Arc<dyn Refresher>) =
+        (Arc::new(token_store::MemoryStore::default()), Arc::new(OfflineRefresher));
+    #[cfg(not(test))]
+    let (store, refresher): (Arc<dyn token_store::TokenStore>, Arc<dyn Refresher>) =
+        (Arc::new(KeyringStore), Arc::new(MsRefresher));
+
+    #[cfg(not(test))]
     if account_id == DEFAULT_ACCOUNT {
         // Pre-multi-account installs kept one token under `auth_cache`.
         if let Err(e) = token_store::migrate_legacy(
@@ -75,7 +103,7 @@ pub fn broker_for(account_id: &str) -> Arc<TokenBroker> {
             warn!("Legacy token migration failed (legacy entry kept): {}", e);
         }
     }
-    let broker = Arc::new(TokenBroker::new(account_id, store, Arc::new(MsRefresher)));
+    let broker = Arc::new(TokenBroker::new(account_id, store, refresher));
     map.insert(account_id.to_string(), Arc::clone(&broker));
     broker
 }
@@ -91,6 +119,10 @@ impl AuthManager {
     /// Manager for the default (legacy single) account.
     pub fn new() -> Self {
         Self::for_account(DEFAULT_ACCOUNT)
+    }
+
+    pub fn account_id(&self) -> &str {
+        self.broker.account_id()
     }
 
     pub fn for_account(account_id: &str) -> Self {
@@ -323,7 +355,7 @@ impl AuthManager {
         // Prefer in-memory token over keyring read — the background auth thread
         // has just written the token to keyring and set self.access_token.
         // Using is_authenticated() (which reads keyring) can race or fail silently.
-        let authenticated = self.access_token.is_some() || self.is_authenticated();
+        let authenticated = self.access_token.is_some() || self.is_authenticated() || any_account_authenticated();
         
         let state = serde_json::json!({
             "is_authenticated": authenticated,
@@ -351,7 +383,7 @@ impl AuthManager {
         use std::fs;
         
         let error_state = serde_json::json!({
-            "is_authenticated": false,
+            "is_authenticated": any_account_authenticated(),
             "error": error_msg,
         });
         
@@ -368,6 +400,16 @@ impl AuthManager {
 
     /// Start device flow and write code to file for QML display (non-blocking)
     pub fn start_device_flow_interactive(&mut self, config_dir: &std::path::Path) -> Result<bool> {
+        self.start_device_flow_with_callback(config_dir, None)
+    }
+
+    /// Like `start_device_flow_interactive`; `on_success(account_id)` runs on the
+    /// polling thread once tokens for this manager's account have been stored.
+    pub fn start_device_flow_with_callback(
+        &mut self,
+        config_dir: &std::path::Path,
+        on_success: Option<Box<dyn FnOnce(&str) + Send>>,
+    ) -> Result<bool> {
         info!("Starting Device Flow login...");
         
         // Request device code from Microsoft
@@ -412,14 +454,19 @@ impl AuthManager {
         // This allows QML UI to remain responsive while polling happens
         let device_response_clone = device_response.clone();
         let config_dir_clone = config_dir.to_path_buf();
+        let account_id = self.account_id().to_string();
         
         std::thread::spawn(move || {
-            let mut auth = AuthManager::default();
+            // Tokens go to the account this login was started for (not always the default one).
+            let mut auth = AuthManager::for_account(&account_id);
             match auth.poll_for_token(&device_response_clone) {
                 Ok(Some(_)) => {
                     match auth.write_state_file(&config_dir_clone) {
                         Ok(()) => {
                             info!("✅ Background token polling succeeded - state file written");
+                            if let Some(cb) = on_success {
+                                cb(&account_id);
+                            }
                         }
                         Err(e) => {
                             warn!("Failed to write state file: {}", e);

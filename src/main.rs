@@ -13,22 +13,17 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
-/// Email address of the signed-in account, resolved once via Graph `/me`
-/// (User.Read) and cached for GET /accounts. Cleared on sign-out.
-static ACCOUNT_EMAIL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-static ACCOUNT_FETCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Process-wide sync scheduler (one mail + one calendar thread per signed-in account).
+static SCHEDULER: std::sync::OnceLock<Arc<omarchylook::scheduler::SyncScheduler>> = std::sync::OnceLock::new();
 
-fn fetch_account_email() -> Option<String> {
-    let token = AuthManager::new().get_token().ok()?;
-    let me: serde_json::Value = ureq::get("https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName")
-        .set("Authorization", &format!("Bearer {}", token))
-        .call()
-        .ok()?
-        .into_json()
-        .ok()?;
-    me["mail"].as_str().filter(|s| !s.is_empty())
-        .or_else(|| me["userPrincipalName"].as_str())
-        .map(|s| s.to_string())
+/// Value of `?key=` in a request line (percent-decoded).
+fn query_param(first_line: &str, key: &str) -> Option<String> {
+    let needle = format!("{}=", key);
+    first_line.split_once('?').and_then(|(_, q)| {
+        q.split(|c| c == ' ' || c == '\r' || c == '\n').next().and_then(|q| {
+            q.split('&').find_map(|kv| kv.strip_prefix(needle.as_str()).map(url_decode))
+        })
+    }).filter(|v| !v.is_empty())
 }
 
 /// Percent-decode a URL query parameter value (e.g. %3D → =, %2F → /)
@@ -213,17 +208,10 @@ fn initialize_app(config_dir: &PathBuf, db_path: &str, settings_path: &str) -> o
         start_http_trigger_server(&config_dir_http);
     });
     
-    // Start email daemon in a separate thread with tokio runtime
-    let config_dir_daemon = config_dir.clone();
-    std::thread::spawn(move || {
-        start_email_daemon_thread(&config_dir_daemon);
-    });
-    
-    // Start calendar daemon (independent of the email daemon)
-    let config_dir_cal = config_dir.clone();
-    std::thread::spawn(move || {
-        start_calendar_daemon_thread(&config_dir_cal);
-    });
+    // Per-account sync (mail + calendar threads for every signed-in account)
+    let scheduler = Arc::new(omarchylook::scheduler::SyncScheduler::new(config_dir));
+    let _ = SCHEDULER.set(Arc::clone(&scheduler));
+    std::thread::spawn(move || scheduler.start_all());
     
     Ok(())
 }
@@ -240,33 +228,41 @@ fn watch_for_device_flow_trigger(config_dir: &PathBuf) {
     loop {
         thread::sleep(Duration::from_millis(500));
         
-        // Check login trigger
+        // Legacy trigger files go through the same account code as the HTTP routes, so a
+        // login creates a normal <provider>-<suffix> account and starts its sync.
+        // login:  file content = provider (default "exchange")
+        // logout: file content = account id (empty = sign out every account)
         if fs::metadata(trigger_file).is_ok() {
-            info!("🔔 Device Flow trigger file detected - starting device flow");
+            let provider = fs::read_to_string(trigger_file).unwrap_or_default().trim().to_string();
+            let provider = if provider.is_empty() { "exchange".to_string() } else { provider };
             let _ = fs::remove_file(trigger_file);
-            
-            let mut auth = AuthManager::new();
-            info!("📱 Calling trigger_device_flow with config_dir: {}", config_dir.display());
-            match auth.trigger_device_flow(config_dir) {
-                Ok(true) => info!("✅ Device Flow triggered successfully"),
-                Ok(false) => info!("❌ Device Flow cancelled by user"),
-                Err(e) => error!("❌ Device Flow failed: {}", e),
+            info!("🔔 Trigger file: add {} account", provider);
+            match SCHEDULER.get() {
+                Some(scheduler) => {
+                    if let Err(e) = omarchylook::account_ops::begin_add_account(config_dir, &provider, Arc::clone(scheduler)) {
+                        error!("❌ Add account failed: {}", e);
+                    }
+                }
+                None => warn!("Trigger file ignored: scheduler not ready yet"),
             }
         }
-        
-        // Check logout trigger
+
         if fs::metadata(logout_trigger_file).is_ok() {
-            info!("🔔 Logout trigger file detected - logging out");
+            let id = fs::read_to_string(logout_trigger_file).unwrap_or_default().trim().to_string();
             let _ = fs::remove_file(logout_trigger_file);
-            
-            let mut auth = AuthManager::new();
-            match auth.logout() {
-                Ok(()) => {
-                    info!("✅ Logout successful");
-                    // Write cleared auth state for QML to pick up
-                    let _ = auth.write_state_file(config_dir);
+            info!("🔔 Trigger file: log out {}", if id.is_empty() { "all accounts" } else { &id });
+            match SCHEDULER.get() {
+                Some(scheduler) => {
+                    let result = if id.is_empty() {
+                        omarchylook::account_ops::sign_out_all(config_dir, scheduler).map(|n| info!("✅ Signed out {} account(s)", n))
+                    } else {
+                        omarchylook::account_ops::sign_out_account(config_dir, &id, scheduler)
+                    };
+                    if let Err(e) = result {
+                        error!("❌ Logout failed: {}", e);
+                    }
                 }
-                Err(e) => error!("❌ Logout failed: {}", e),
+                None => warn!("Trigger file ignored: scheduler not ready yet"),
             }
         }
     }
@@ -341,30 +337,9 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     continue;
                 }
 
-                // ── GET /accounts — signed-in accounts (currently one Exchange account) ──
+                // ── GET /accounts — configured accounts and whether each is signed in ──
                 if first_line.contains("GET /accounts") {
-                    use std::sync::atomic::Ordering;
-                    let body = if AuthManager::new().is_authenticated() {
-                        let cached = ACCOUNT_EMAIL.lock().ok().and_then(|g| g.clone());
-                        if cached.is_none() && !ACCOUNT_FETCHING.swap(true, Ordering::SeqCst) {
-                            // Resolve off the HTTP thread; the UI re-polls while email is empty
-                            std::thread::spawn(|| {
-                                if let Some(email) = fetch_account_email() {
-                                    if let Ok(mut g) = ACCOUNT_EMAIL.lock() { *g = Some(email); }
-                                }
-                                ACCOUNT_FETCHING.store(false, Ordering::SeqCst);
-                            });
-                        }
-                        serde_json::to_string(&[serde_json::json!({
-                            "id": "exchange-primary",
-                            "provider": "exchange",
-                            "email": cached.unwrap_or_default(),
-                            "signed_in": true,
-                        })]).unwrap_or_else(|_| "[]".to_string())
-                    } else {
-                        if let Ok(mut g) = ACCOUNT_EMAIL.lock() { *g = None; }
-                        "[]".to_string()
-                    };
+                    let body = omarchylook::account_ops::accounts_json(config_dir);
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                         body.len(), body
@@ -555,6 +530,8 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     "login"
                 } else if first_line.contains("POST /auth/logout") {
                     "logout"
+                } else if first_line.contains("POST /accounts/remove") {
+                    "remove"
                 } else {
                     ""
                 };
@@ -571,32 +548,32 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
 
                 match action {
                     "login" => {
-                        info!("🔔 HTTP trigger: device flow login requested");
-                        let config_dir = config_dir.clone();
-                        std::thread::spawn(move || {
-                            let mut auth = AuthManager::new();
-                            // Clear any stale error from auth_state.json immediately
-                            // so QML poller doesn't keep displaying the old error
-                            let _ = std::fs::write(
-                                config_dir.join("auth_state.json"),
-                                "{\"is_authenticated\":false}",
-                            );
-                            match auth.trigger_device_flow(&config_dir) {
-                                Ok(true) => info!("✅ HTTP-triggered device flow succeeded"),
-                                Ok(false) => info!("❌ HTTP-triggered device flow cancelled"),
-                                Err(e) => error!("❌ HTTP-triggered device flow failed: {}", e),
-                            }
-                        });
+                        // New account: its id is generated as <provider>-<suffix>
+                        let provider = query_param(first_line, "provider").unwrap_or_else(|| "exchange".to_string());
+                        info!("🔔 HTTP trigger: add {} account requested", provider);
+                        if let Some(scheduler) = SCHEDULER.get() {
+                            let (config_dir, scheduler) = (config_dir.clone(), Arc::clone(scheduler));
+                            std::thread::spawn(move || {
+                                if let Err(e) = omarchylook::account_ops::begin_add_account(&config_dir, &provider, scheduler) {
+                                    error!("❌ Add account failed: {}", e);
+                                }
+                            });
+                        }
                     }
-                    "logout" => {
-                        info!("🔔 HTTP trigger: logout requested");
-                        let mut auth = AuthManager::new();
-                        match auth.logout() {
-                            Ok(()) => {
-                                info!("✅ HTTP-triggered logout succeeded");
-                                let _ = auth.write_state_file(config_dir);
+                    "logout" | "remove" => {
+                        let id = query_param(first_line, "account")
+                            .unwrap_or_else(|| omarchylook::token_store::DEFAULT_ACCOUNT.to_string());
+                        info!("🔔 HTTP trigger: {} account {}", action, id);
+                        if let Some(scheduler) = SCHEDULER.get() {
+                            let result = if action == "remove" {
+                                omarchylook::account_ops::remove_account(config_dir, &id, scheduler)
+                            } else {
+                                omarchylook::account_ops::sign_out_account(config_dir, &id, scheduler)
+                            };
+                            match result {
+                                Ok(()) => info!("✅ {} succeeded for {}", action, id),
+                                Err(e) => error!("❌ {} failed for {}: {}", action, id, e),
                             }
-                            Err(e) => error!("❌ HTTP-triggered logout failed: {}", e),
                         }
                     }
                     _ => {}
@@ -605,86 +582,4 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
             Err(e) => warn!("HTTP trigger server accept error: {}", e),
         }
     }
-}
-
-/// Start the email daemon with its own tokio runtime
-/// This runs in a separate thread and continuously syncs emails
-fn start_email_daemon_thread(config_dir: &PathBuf) {
-    let config_dir_clone = config_dir.clone();
-    
-    // Create a new tokio runtime for this thread
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build() {
-        Ok(r) => r,
-        Err(e) => {
-            error!("Failed to create tokio runtime for email daemon: {}", e);
-            return;
-        }
-    };
-    
-    info!("Email daemon thread starting...");
-    
-    // Run the daemon in the tokio context
-    rt.block_on(async {
-        // Create the email provider (Graph API)
-        let auth = AuthManager::new();
-        let provider = Arc::new(omarchylook::providers::graph::GraphEmailProvider::new(auth));
-        
-        // Open database (will be accessed synchronously from blocking context)
-        let db_path = config_dir_clone.join("messages.db");
-        let db_str = db_path.to_str().unwrap_or("messages.db").to_string();
-        let daemon_db = match Database::open(&db_str) {
-            Ok(db) => Arc::new(db),
-            Err(e) => {
-                error!("Failed to open database for email daemon: {}", e);
-                return;
-            }
-        };
-        
-        // Create the daemon with config
-        let daemon_config = DaemonConfig {
-            poll_interval_secs: 120,
-            folder_sync_interval_secs: 600,
-            max_retries: 10,
-        };
-        let daemon = EmailDaemon::new(daemon_config, daemon_db, provider);
-        
-        // Run the daemon (this will loop indefinitely)
-        daemon.start().await;
-    });
-}
-
-/// Start the calendar daemon with its own tokio runtime (separate from mail)
-fn start_calendar_daemon_thread(config_dir: &PathBuf) {
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(r) => r,
-        Err(e) => {
-            error!("Failed to create tokio runtime for calendar daemon: {}", e);
-            return;
-        }
-    };
-
-    info!("Calendar daemon thread starting...");
-
-    rt.block_on(async {
-        let auth = AuthManager::new();
-        let provider = Arc::new(omarchylook::providers::GraphCalendarProvider::new(auth));
-
-        let db_path = config_dir.join("messages.db");
-        let db = match Database::open(db_path.to_str().unwrap_or("messages.db")) {
-            Ok(db) => Arc::new(db),
-            Err(e) => {
-                error!("Failed to open database for calendar daemon: {}", e);
-                return;
-            }
-        };
-
-        let daemon = omarchylook::calendar_daemon::CalendarDaemon::new(
-            omarchylook::calendar_daemon::CalendarDaemonConfig::default(),
-            db,
-            provider,
-        );
-        daemon.start().await;
-    });
 }

@@ -298,6 +298,26 @@ impl TokenBroker {
         Ok(())
     }
 
+    /// Current stored credentials (for moving them to another account id).
+    pub fn snapshot(&self) -> Option<CachedToken> {
+        let mut st = self.lock();
+        self.ensure_loaded(&mut st);
+        st.stored.clone()
+    }
+
+    /// Take over credentials obtained under another id (re-login of an existing account).
+    pub fn adopt(&self, token: &CachedToken) -> Result<()> {
+        let mut st = self.lock();
+        self.store.save(&self.account_id, token)?;
+        st.stored = Some(token.clone());
+        st.loaded = true;
+        st.access = None;
+        st.expires_at = None;
+        st.needs_reauth = false;
+        st.retry_after = None;
+        Ok(())
+    }
+
     /// Forget this account's tokens everywhere.
     pub fn sign_out(&self) -> Result<()> {
         let mut st = self.lock();
@@ -457,6 +477,20 @@ mod tests {
         assert!(store.load("b").unwrap().is_some());
     }
 
+    #[test]
+    fn adopt_replaces_tokens_and_clears_reauth_flag() {
+        let store = seeded();
+        let b = TokenBroker::new("a", store.clone(), FakeRefresher::new(|| RefreshOutcome::InvalidGrant("dead".into())));
+        assert!(b.get_token().is_err());
+        assert!(b.needs_reauth());
+        let fresh = CachedToken { access_token: "n".into(), refresh_token: Some("rn".into()) };
+        b.adopt(&fresh).unwrap();
+        assert!(b.is_authenticated());
+        assert!(!b.needs_reauth());
+        assert_eq!(store.load("a").unwrap().unwrap().refresh_token.as_deref(), Some("rn"));
+        assert_eq!(b.snapshot().unwrap().refresh_token.as_deref(), Some("rn"));
+    }
+
     // ── migration ────────────────────────────────────────────────
     fn legacy_json() -> String {
         serde_json::to_string(&CachedToken { access_token: "acc".into(), refresh_token: Some("ref".into()) }).unwrap()
@@ -514,11 +548,17 @@ mod tests {
 mod keyring_live {
     use super::*;
 
-    /// Round-trips a throwaway account through the real OS keyring.
-    /// Run with: cargo test keyring_live -- --ignored
+    /// Round-trips a throwaway account through the real OS keyring. Opt-in only: it talks
+    /// to the live keyring daemon (a run coincided with a gnome-keyring crash once), so it
+    /// needs both --ignored and OMARCHY_LIVE_KEYRING_TEST=1.
+    /// Run with: OMARCHY_LIVE_KEYRING_TEST=1 cargo test keyring_live -- --ignored
     #[test]
     #[ignore]
     fn keyring_round_trip_with_throwaway_account() {
+        if std::env::var("OMARCHY_LIVE_KEYRING_TEST").as_deref() != Ok("1") {
+            eprintln!("skipped: set OMARCHY_LIVE_KEYRING_TEST=1 to touch the real keyring");
+            return;
+        }
         let id = format!("test-{}", std::process::id());
         let store = KeyringStore;
         let t = CachedToken { access_token: "a".into(), refresh_token: Some("r".into()) };

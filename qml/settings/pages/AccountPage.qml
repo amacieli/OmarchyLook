@@ -5,9 +5,11 @@ import qs.Ui
 import "../../common"
 import ".."
 
-// Accounts: add a mail account of any provider, then manage every signed-in
-// account below. Only the Exchange/Microsoft sign-in is backed by the daemon
-// today; the other providers are listed so the flow is in place for them.
+// Accounts: add a mail account of any provider, then manage every account below.
+// Exchange/Outlook (Microsoft) sign-in works, any number of them; the other
+// providers are listed so the flow is in place for them.
+// "Log out" keeps the account and its cached data (shown as signed out);
+// "Remove" deletes the account and its cached data.
 SettingsPage {
   id: page
 
@@ -18,8 +20,9 @@ SettingsPage {
   property string newProvider: "exchange"
   property string notice: ""
 
-  signal loginRequested()
-  signal logoutRequested()
+  signal loginRequested(string provider)
+  signal logoutRequested(string accountId)
+  signal removeRequested(string accountId)
 
   editing: providerDropdown.popupOpen
 
@@ -48,11 +51,9 @@ SettingsPage {
     var microsoft = page.newProvider === "exchange" || page.newProvider === "outlook"
     if (!microsoft) {
       page.notice = page.providerLabel(page.newProvider) + " sign-in isn't supported by the backend yet."
-    } else if (page.accounts.length > 0 || page.isAuthenticated) {
-      page.notice = "Only one Microsoft account can be signed in right now — multi-account support is still to come."
     } else {
       page.notice = ""
-      page.loginRequested()
+      page.loginRequested(page.newProvider)
     }
   }
 
@@ -125,15 +126,36 @@ SettingsPage {
             elide: Text.ElideRight
           }
           UiText {
-            text: modelData.signed_in ? "signed in" : "signed out"
+            text: modelData.signed_in ? "signed in" : "signed out — cached data kept"
             foreground: modelData.signed_in ? Color.accent : Color.foreground
             dim: !modelData.signed_in
           }
+          // Signed out → "Log in": a device-flow login; signing in to this same mailbox
+          // re-attaches it to this account (cached data kept, no re-sync).
           Button {
             bordered: true
-            iconText: "\uf2f5"
-            text: "Log out"
-            onClicked: page.logoutRequested()
+            iconText: modelData.signed_in ? "\uf2f5" : "\uf090"
+            text: modelData.signed_in ? "Log out" : "Log in"
+            onClicked: modelData.signed_in ? page.logoutRequested(modelData.id)
+                                           : page.loginRequested(modelData.provider)
+          }
+          // Two-step remove: it deletes the cached mail/calendar data too.
+          Button {
+            id: removeButton
+            property bool confirming: false
+            bordered: true
+            iconText: "\uf1f8"
+            text: confirming ? "Really remove?" : "Remove"
+            foreground: confirming ? Color.urgent : Color.foreground
+            onClicked: {
+              if (confirming) { confirming = false; page.removeRequested(modelData.id) }
+              else confirming = true
+            }
+            Timer {
+              interval: 4000
+              running: removeButton.confirming
+              onTriggered: removeButton.confirming = false
+            }
           }
         }
       }
