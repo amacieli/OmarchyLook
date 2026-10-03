@@ -14,6 +14,8 @@ Item {
     return (d && d.length > 0) ? d : Quickshell.env("HOME") + "/.config/omarchylook"
   }
   property bool backendOnline: false
+  // Calendar view chosen in the calendar dropdown: day | workweek | week | month
+  property string calendarMode: "month"
   readonly property alias auth: authController
 
   // ---------------------------------------------------------- navigation

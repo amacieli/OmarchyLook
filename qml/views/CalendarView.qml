@@ -1,13 +1,16 @@
 import QtQuick
 import QtQuick.Layouts
+import qs.Ui
+import "CalendarUtil.js" as CU
 
-// CalendarView — month grid + event sidebar, omarchy aesthetic
+// CalendarView — header (view dropdown, navigation, title) above one of four
+// separate views: DayView, WorkWeekView, FullWeekView, MonthView.
 // Data source: http://127.0.0.1:27182/calendar/events?month=YYYY-MM
 Rectangle {
     id: root
     color: "#000000"
 
-    // ── theme props forwarded from main.qml root ──────────────────
+    // ── theme props forwarded from AppShell ───────────────────────
     property string monoFont:     "JetBrainsMono Nerd Font"
     property color  accentColor:  "#7c6af7"
     property color  successColor: "#51cf66"
@@ -16,459 +19,225 @@ Rectangle {
     property color  dimColor:     "#555555"
     property color  veryDimColor: "#2a2a2a"
 
-    // ── calendar state ────────────────────────────────────────────
-    property int viewYear:  new Date().getFullYear()
-    property int viewMonth: new Date().getMonth() + 1   // 1-based
-    property int todayDay:  new Date().getDate()
-    property int todayMonth: new Date().getMonth() + 1
-    property int todayYear:  new Date().getFullYear()
-    property int selectedDay: new Date().getDate()
+    // "day" | "workweek" | "week" | "month"  (AppShell keeps this across tab switches)
+    property string mode: "month"
+    property date   anchorDate: new Date()
+    property date   today: new Date()
 
-    // events loaded from backend (array of objects)
-    property var events: []
-    property bool loading: true
+    property var  rawEvents: []
+    property var  events: CU.normalise(rawEvents)
+    property bool loading: false
+    property int  _reqSerial: 0
 
-    readonly property var monthNames: [
-        "January","February","March","April","May","June",
-        "July","August","September","October","November","December"
+    readonly property var viewOptions: [
+        { value: "day",      label: "Day" },
+        { value: "workweek", label: "Work week" },
+        { value: "week",     label: "Week" },
+        { value: "month",    label: "Month" }
     ]
-    readonly property var dayNames: ["Mo","Tu","We","Th","Fr","Sa","Su"]
 
-    // ── helper functions ──────────────────────────────────────────
-    function daysInMonth(y, m) {
-        return new Date(y, m, 0).getDate()
-    }
-
-    // ISO weekday of the 1st of viewYear/viewMonth (1=Mon … 7=Sun)
-    function firstWeekday(y, m) {
-        var d = new Date(y, m - 1, 1).getDay()  // 0=Sun…6=Sat
-        return d === 0 ? 7 : d                   // convert to 1=Mon
-    }
-
-    function eventsForDay(day) {
-        if (!root.events || root.events.length === 0) return []
-        var pad = function(n){ return n < 10 ? "0" + n : "" + n }
-        var prefix = viewYear + "-" + pad(viewMonth) + "-" + pad(day)
-        var out = []
-        for (var i = 0; i < events.length; i++) {
-            if (events[i].start && events[i].start.startsWith(prefix))
-                out.push(events[i])
+    // ── navigation ────────────────────────────────────────────────
+    function step(dir) {
+        switch (mode) {
+        case "day":      anchorDate = CU.addDays(anchorDate, dir);   break
+        case "workweek":
+        case "week":     anchorDate = CU.addDays(anchorDate, 7 * dir); break
+        default:         anchorDate = CU.addMonths(anchorDate, dir)
         }
-        return out
+    }
+    function goToday() { today = new Date(); anchorDate = today }
+
+    function openDay(d) { anchorDate = d; mode = "day" }
+
+    // inclusive range of dates the current view can show
+    function visibleRange() {
+        switch (mode) {
+        case "day":      return [CU.startOfDay(anchorDate), CU.startOfDay(anchorDate)]
+        case "workweek":
+        case "week":     var s = CU.weekStart(anchorDate); return [s, CU.addDays(s, 6)]
+        default:         var g = CU.monthGridStart(anchorDate); return [g, CU.addDays(g, 41)]
+        }
     }
 
-    function prevMonth() {
-        if (viewMonth === 1) { viewMonth = 12; viewYear-- }
-        else viewMonth--
-        selectedDay = 1
-        loadEvents()
+    readonly property string title: {
+        var a = anchorDate
+        if (mode === "day")
+            return CU.DAYS_SHORT[CU.isoIndex(a)] + "  " + a.getDate() + " " + CU.MONTHS[a.getMonth()] + " " + a.getFullYear()
+        if (mode === "workweek" || mode === "week") {
+            var s = CU.weekStart(a), e = CU.addDays(s, mode === "workweek" ? 4 : 6)
+            var l = s.getDate() + (s.getMonth() !== e.getMonth() ? " " + CU.MONTHS[s.getMonth()].substring(0, 3) : "")
+            return l + " – " + e.getDate() + " " + CU.MONTHS[e.getMonth()].substring(0, 3) + " " + e.getFullYear()
+        }
+        return CU.MONTHS[a.getMonth()] + "  " + a.getFullYear()
     }
 
-    function nextMonth() {
-        if (viewMonth === 12) { viewMonth = 1; viewYear++ }
-        else viewMonth++
-        selectedDay = 1
-        loadEvents()
-    }
+    // ── data loading: fetch every month the visible range touches ─
+    property var _cache: ({})       // "YYYY-MM" -> array
 
-    function loadEvents() {
-        loading = true
-        var pad = function(n){ return n < 10 ? "0" + n : "" + n }
-        var month = viewYear + "-" + pad(viewMonth)
-        var xhr = new XMLHttpRequest()
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState !== XMLHttpRequest.DONE) return
-            loading = false
-            if (xhr.status === 200) {
-                try { root.events = JSON.parse(xhr.responseText) }
-                catch(e) { root.events = [] }
-            } else {
-                root.events = []
+    function _merge() {
+        var r = visibleRange(), months = CU.monthsBetween(r[0], r[1]), out = [], seen = {}
+        for (var i = 0; i < months.length; i++) {
+            var list = _cache[months[i]] || []
+            for (var j = 0; j < list.length; j++) {
+                var k = JSON.stringify(list[j])
+                if (!seen[k]) { seen[k] = true; out.push(list[j]) }
             }
         }
-        xhr.open("GET", "http://127.0.0.1:27182/calendar/events?month=" + month)
-        xhr.send()
+        rawEvents = out
     }
 
+    function loadEvents(force) {
+        var r = visibleRange(), months = CU.monthsBetween(r[0], r[1])
+        var pending = 0, serial = ++_reqSerial
+        if (force) _cache = ({})
+        months.forEach(function(m) {
+            if (_cache[m] !== undefined) return
+            pending++
+            var xhr = new XMLHttpRequest()
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState !== XMLHttpRequest.DONE) return
+                var res = []
+                if (xhr.status === 200) { try { res = JSON.parse(xhr.responseText) } catch (e) { res = [] } }
+                var c = root._cache; c[m] = res; root._cache = c
+                if (--pending === 0 && serial === root._reqSerial) { root.loading = false; root._merge() }
+            }
+            xhr.open("GET", "http://127.0.0.1:27182/calendar/events?month=" + m)
+            xhr.send()
+        })
+        if (pending === 0) { loading = false; _merge() } else loading = true
+    }
+
+    onModeChanged:       loadEvents(false)
+    onAnchorDateChanged: loadEvents(false)
+    Component.onCompleted: loadEvents(true)
+
     // ── layout ────────────────────────────────────────────────────
-    RowLayout {
+    ColumnLayout {
         anchors.fill: parent
         spacing: 0
 
-        // ── LEFT: month grid ──────────────────────────────────────
-        ColumnLayout {
-            Layout.fillHeight: true
-            Layout.preferredWidth: 460
-            spacing: 0
+        // header bar
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 44
+            color: "#000000"
+            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: "#111111" }
 
-            // ── header row: nav + month label ─────────────────────
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 38
-                color: "#000000"
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                spacing: 12
 
-                // subtle bottom separator
-                Rectangle {
-                    anchors.bottom: parent.bottom
-                    width: parent.width; height: 1
-                    color: "#111111"
-                }
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 12
-                    anchors.rightMargin: 12
-                    spacing: 0
-
-                    // prev
-                    Text {
-                        text: "‹"
-                        font.family: root.monoFont
-                        font.pixelSize: 18
-                        color: prevMouse.containsMouse ? root.accentColor : root.dimColor
-                        MouseArea {
-                            id: prevMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.prevMonth()
-                        }
-                    }
-
-                    Item { Layout.fillWidth: true }
-
-                    Text {
-                        text: root.monthNames[root.viewMonth - 1] + "  " + root.viewYear
-                        font.family: root.monoFont
-                        font.pixelSize: 13
-                        font.bold: true
-                        color: root.accentColor
-                        font.letterSpacing: 1
-                    }
-
-                    Item { Layout.fillWidth: true }
-
-                    // next
-                    Text {
-                        text: "›"
-                        font.family: root.monoFont
-                        font.pixelSize: 18
-                        color: nextMouse.containsMouse ? root.accentColor : root.dimColor
-                        MouseArea {
-                            id: nextMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: root.nextMonth()
-                        }
-                    }
-                }
-            }
-
-            // ── day-name header row ───────────────────────────────
-            Row {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 24
-                Repeater {
-                    model: root.dayNames
-                    delegate: Item {
-                        width: Math.floor((460) / 7)
-                        height: 24
-                        Text {
-                            anchors.centerIn: parent
-                            text: modelData
-                            font.family: root.monoFont
-                            font.pixelSize: 10
-                            color: (index >= 5) ? root.dimColor : "#444444"
-                        }
-                    }
-                }
-            }
-
-            // ── calendar grid ─────────────────────────────────────
-            Grid {
-                id: calGrid
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                columns: 7
-                rowSpacing: 1
-                columnSpacing: 1
-
-                property int cellW: Math.floor(459 / 7)
-                property int cellH: Math.floor(height / 6)
-                property int totalDays:  root.daysInMonth(root.viewYear, root.viewMonth)
-                property int startOffset: root.firstWeekday(root.viewYear, root.viewMonth) - 1
-
-                Repeater {
-                    // 6 weeks × 7 days = 42 cells
-                    model: 42
-                    delegate: Rectangle {
-                        width:  calGrid.cellW
-                        height: calGrid.cellH
-                        color:  "#000000"
-
-                        property int dayNum: index - calGrid.startOffset + 1
-                        property bool inMonth:   dayNum >= 1 && dayNum <= calGrid.totalDays
-                        property bool isToday:   inMonth && dayNum === root.todayDay
-                                                  && root.viewMonth === root.todayMonth
-                                                  && root.viewYear  === root.todayYear
-                        property bool isSelected: inMonth && dayNum === root.selectedDay
-                        property bool isWeekend: (index % 7) >= 5
-                        property var  dayEvts:   inMonth ? root.eventsForDay(dayNum) : []
-
-                        // selected day ring
-                        Rectangle {
-                            visible: parent.isSelected
-                            anchors.top:  parent.top
-                            anchors.left: parent.left
-                            width:  parent.width - 1
-                            height: parent.height - 1
-                            color:  "transparent"
-                            border.color: root.accentColor
-                            border.width: 1
-                        }
-
-                        // today fill
-                        Rectangle {
-                            visible: parent.isToday && !parent.isSelected
-                            anchors.centerIn: parent
-                            width:  Math.min(parent.width, parent.height) - 6
-                            height: width
-                            radius: width / 2
-                            color:  Qt.rgba(0.49, 0.42, 0.97, 0.14)
-                        }
-
-                        ColumnLayout {
-                            anchors.fill: parent
-                            anchors.margins: 3
-                            spacing: 1
-
-                            // day number
-                            Text {
-                                text: parent.parent.inMonth ? parent.parent.dayNum : ""
-                                font.family: root.monoFont
-                                font.pixelSize: 11
-                                color: {
-                                    if (!parent.parent.inMonth) return "transparent"
-                                    if (parent.parent.isToday) return root.accentColor
-                                    if (parent.parent.isWeekend) return root.dimColor
-                                    return root.textColor
-                                }
-                                font.bold: parent.parent.isToday
-                            }
-
-                            // event dots (up to 3)
-                            Row {
-                                id: dotRow
-                                spacing: 2
-                                visible: parent.parent.inMonth
-
-                                property var cellEvts: parent.parent.dayEvts || []
-
-                                Repeater {
-                                    model: Math.min(dotRow.cellEvts.length, 3)
-                                    Rectangle {
-                                        width: 4; height: 4; radius: 2
-                                        color: root.accentColor
-                                    }
-                                }
-                            }
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            enabled: parent.inMonth
-                            onClicked: root.selectedDay = parent.dayNum
-                        }
-                    }
-                }
-            }
-
-            // ── "today" button ────────────────────────────────────
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 28
-                color: "#000000"
-
-                Rectangle {
-                    anchors.top: parent.top
-                    width: parent.width; height: 1; color: "#111111"
+                // view chooser
+                Dropdown {
+                    id: viewDropdown
+                    Layout.preferredWidth: 150
+                    Layout.alignment: Qt.AlignVCenter
+                    showLabel: false
+                    options: root.viewOptions
+                    value: root.mode
+                    onChanged: function(v) { root.mode = v }
                 }
 
                 Text {
-                    anchors.centerIn: parent
-                    text: "  today  "
-                    font.family: root.monoFont
-                    font.pixelSize: 10
-                    color: todayBtnMouse.containsMouse ? root.accentColor : root.dimColor
+                    text: "‹"
+                    font.family: root.monoFont; font.pixelSize: 20
+                    color: prevMouse.containsMouse ? root.accentColor : root.dimColor
+                    MouseArea { id: prevMouse; anchors.fill: parent; anchors.margins: -6
+                        hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.step(-1) }
+                }
+                Text {
+                    text: "›"
+                    font.family: root.monoFont; font.pixelSize: 20
+                    color: nextMouse.containsMouse ? root.accentColor : root.dimColor
+                    MouseArea { id: nextMouse; anchors.fill: parent; anchors.margins: -6
+                        hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.step(1) }
+                }
+                Text {
+                    text: "today"
+                    font.family: root.monoFont; font.pixelSize: 11
+                    color: todayMouse.containsMouse ? root.accentColor : root.dimColor
+                    MouseArea { id: todayMouse; anchors.fill: parent; anchors.margins: -6
+                        hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.goToday() }
                 }
 
-                MouseArea {
-                    id: todayBtnMouse
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        root.viewYear  = root.todayYear
-                        root.viewMonth = root.todayMonth
-                        root.selectedDay = root.todayDay
-                        root.loadEvents()
+                Text {
+                    text: root.title
+                    font.family: root.monoFont; font.pixelSize: 13; font.bold: true
+                    font.letterSpacing: 1
+                    color: root.accentColor
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                }
+
+                Text {
+                    visible: root.loading
+                    text: "⟳"
+                    font.family: root.monoFont; font.pixelSize: 12
+                    color: root.dimColor
+                    RotationAnimation on rotation {
+                        from: 0; to: 360; duration: 1200
+                        loops: Animation.Infinite; running: root.loading
                     }
                 }
             }
         }
 
-        // vertical divider
-        Rectangle {
-            Layout.fillHeight: true
-            width: 1
-            color: "#111111"
-        }
-
-        // ── RIGHT: event list for selected day ────────────────────
-        ColumnLayout {
+        // active view
+        Loader {
+            id: viewLoader
             Layout.fillWidth: true
             Layout.fillHeight: true
-            spacing: 0
-
-            // day header
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 38
-                color: "#000000"
-
-                Rectangle {
-                    anchors.bottom: parent.bottom
-                    width: parent.width; height: 1; color: "#111111"
-                }
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 16
-                    anchors.rightMargin: 16
-                    spacing: 8
-
-                    Text {
-                        text: "\uf073"  // calendar icon
-                        font.family: root.monoFont
-                        font.pixelSize: 13
-                        color: root.accentColor
-                    }
-                    Text {
-                        property var pad: function(n){ return n < 10 ? "0" + n : "" + n }
-                        text: root.dayNames[(new Date(root.viewYear, root.viewMonth - 1, root.selectedDay).getDay() + 6) % 7]
-                              + "  " + root.selectedDay + " " + root.monthNames[root.viewMonth - 1]
-                        font.family: root.monoFont
-                        font.pixelSize: 13
-                        font.bold: true
-                        color: root.textColor
-                        Layout.fillWidth: true
-                    }
-
-                    // loading spinner text
-                    Text {
-                        visible: root.loading
-                        text: "⟳"
-                        font.family: root.monoFont
-                        font.pixelSize: 11
-                        color: root.dimColor
-
-                        RotationAnimation on rotation {
-                            from: 0; to: 360; duration: 1200
-                            loops: Animation.Infinite
-                            running: root.loading
-                        }
-                    }
-                }
-            }
-
-            // event list
-            ListView {
-                id: eventList
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                clip: true
-                spacing: 0
-
-                model: {
-                    var evts = root.eventsForDay(root.selectedDay)
-                    return evts.length > 0 ? evts : []
-                }
-
-                // empty state
-                Text {
-                    anchors.centerIn: parent
-                    visible: eventList.count === 0 && !root.loading
-                    text: "no events"
-                    font.family: root.monoFont
-                    font.pixelSize: 11
-                    color: root.veryDimColor
-                }
-
-                delegate: Rectangle {
-                    width: eventList.width
-                    height: 62
-                    color: "#000000"
-
-                    // left accent bar
-                    Rectangle {
-                        anchors.left:   parent.left
-                        anchors.top:    parent.top
-                        anchors.bottom: parent.bottom
-                        anchors.topMargin: 2
-                        anchors.bottomMargin: 2
-                        width: 2
-                        color: root.accentColor
-                    }
-
-                    // bottom separator
-                    Rectangle {
-                        anchors.bottom: parent.bottom
-                        width: parent.width; height: 1; color: "#111111"
-                    }
-
-                    ColumnLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 14
-                        anchors.rightMargin: 10
-                        anchors.topMargin: 8
-                        anchors.bottomMargin: 8
-                        spacing: 3
-
-                        Text {
-                            text: modelData.subject || modelData.summary || "Untitled"
-                            font.family: root.monoFont
-                            font.pixelSize: 12
-                            font.bold: true
-                            color: root.textColor
-                            elide: Text.ElideRight
-                            Layout.fillWidth: true
-                        }
-
-                        RowLayout {
-                            spacing: 12
-                            Text {
-                                text: "\uf017  " + (modelData.start ? modelData.start.substring(11, 16) : "all day")
-                                font.family: root.monoFont
-                                font.pixelSize: 10
-                                color: root.dimColor
-                            }
-                            Text {
-                                visible: modelData.location && modelData.location.length > 0
-                                text: "\uf3c5  " + (modelData.location || "")
-                                font.family: root.monoFont
-                                font.pixelSize: 10
-                                color: root.dimColor
-                                elide: Text.ElideRight
-                                Layout.fillWidth: true
-                            }
-                        }
-                    }
+            sourceComponent: {
+                switch (root.mode) {
+                case "day":      return dayComponent
+                case "workweek": return workWeekComponent
+                case "week":     return fullWeekComponent
+                default:         return monthComponent
                 }
             }
         }
     }
 
-    Component.onCompleted: loadEvents()
+
+    Component {
+        id: dayComponent
+        DayView {
+            anchorDate: root.anchorDate; events: root.events; today: root.today
+            monoFont: root.monoFont; accentColor: root.accentColor; textColor: root.textColor
+            dimColor: root.dimColor; veryDimColor: root.veryDimColor
+            onDayClicked: function(d) { root.anchorDate = d }
+        }
+    }
+    Component {
+        id: workWeekComponent
+        WorkWeekView {
+            anchorDate: root.anchorDate; events: root.events; today: root.today
+            monoFont: root.monoFont; accentColor: root.accentColor; textColor: root.textColor
+            dimColor: root.dimColor; veryDimColor: root.veryDimColor
+            onDayClicked: function(d) { root.anchorDate = d }
+            onDayActivated: function(d) { root.openDay(d) }
+        }
+    }
+    Component {
+        id: fullWeekComponent
+        FullWeekView {
+            anchorDate: root.anchorDate; events: root.events; today: root.today
+            monoFont: root.monoFont; accentColor: root.accentColor; textColor: root.textColor
+            dimColor: root.dimColor; veryDimColor: root.veryDimColor
+            onDayClicked: function(d) { root.anchorDate = d }
+            onDayActivated: function(d) { root.openDay(d) }
+        }
+    }
+    Component {
+        id: monthComponent
+        MonthView {
+            anchorDate: root.anchorDate; events: root.events; today: root.today
+            monoFont: root.monoFont; accentColor: root.accentColor; textColor: root.textColor
+            dimColor: root.dimColor; veryDimColor: root.veryDimColor
+            onDayClicked: function(d) { root.anchorDate = d }
+            onDayActivated: function(d) { root.openDay(d) }
+        }
+    }
 }
