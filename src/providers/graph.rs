@@ -147,7 +147,7 @@ impl super::EmailProvider for GraphEmailProvider {
             }
 
             total += batch.len();
-            debug!("Fetched page of {} messages from folder {} (total so far: {})", batch.len(), folder_id, total);
+            // debug!("Fetched page of {} messages from folder {} (total so far: {})", batch.len(), folder_id, total);
 
             if !batch.is_empty() {
                 // Send batch to caller — if receiver is gone, stop pagination

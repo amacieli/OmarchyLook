@@ -137,7 +137,7 @@ impl Database {
             .map(|dt| dt.to_utc())
             .unwrap_or_else(Utc::now);
         
-        debug!("Caching message: {}", msg.id);
+        // debug!("Caching message: {}", msg.id);
         
         self.conn.execute(
             "INSERT OR REPLACE INTO messages (id, subject, from_email, from_name, body, received_at, is_read)
@@ -165,7 +165,7 @@ impl Database {
         let exists = stmt.exists(params![id])?;
         
         if exists {
-            debug!("Email {} exists in database", id);
+            // debug!("Email {} exists in database", id);
         }
         
         Ok(exists)
@@ -282,7 +282,7 @@ impl Database {
     /// Insert a new email message (used by daemon)
     pub fn insert_email(&self, email: &EmailMessage) -> Result<()> {
         let now = Utc::now();
-        debug!("Inserting email: {}", email.id);
+        // debug!("Inserting email: {}", email.id);
 
         self.conn.execute(
             "INSERT OR IGNORE INTO messages (id, subject, from_email, body, received_at, is_read, cached_at, folder_id)

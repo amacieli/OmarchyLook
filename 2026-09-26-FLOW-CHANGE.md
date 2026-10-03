@@ -81,7 +81,7 @@ Rectangle {
 ## Build Status
 
 ✅ **Build successful** (2026-09-26 14:50 UTC)
-- Binary: `target/debug/omarchy-look` (45M)
+- Binary: `target/debug/omarchylook` (45M)
 - No new compiler errors
 - 3 pre-existing warnings (unrelated to these changes)
 

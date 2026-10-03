@@ -395,7 +395,7 @@ wheels = [
 ]
 
 [[package]]
-name = "omarchy-look"
+name = "omarchylook"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

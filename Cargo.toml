@@ -1,5 +1,5 @@
 [package]
-name = "omarchy-look"
+name = "omarchylook"
 version = "0.1.0"
 edition = "2021"
 authors = ["Adam"]
@@ -55,7 +55,7 @@ cxx-qt-build = { version = "0.10" }
 cxx-build = "1.0"
 
 [[bin]]
-name = "omarchy-look"
+name = "omarchylook"
 path = "src/main.rs"
 
 [profile.release]
@@ -66,4 +66,5 @@ strip = true
 
 [profile.dev]
 opt-level = 0
+codegen-units = 256
 debug = true

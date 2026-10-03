@@ -731,237 +731,580 @@ Window {
                         sourceComponent: {
                             switch(root.currentView) {
                                 case "settings": return settingsViewComponent
-                                default: return mailViewComponent
+                                case "calendar": return calendarViewComponent
+                                case "contacts": return peopleViewComponent
+                                case "tasks":    return tasksViewComponent
+                                default:         return mailViewComponent
                             }
                         }
                     }
                 }
                 
-                // Mail view component
+                // ── Mail view component ───────────────────────────────────
                 Component {
                     id: mailViewComponent
 
-                    ColumnLayout {
-                        anchors.fill: parent
-                        anchors.margins: 12
-                        spacing: 6
+                    // Two-panel mail shell: list on left, reading pane on right
+                    RowLayout {
+                        spacing: 0
 
-                        // Header row
-                        RowLayout {
-                            Layout.fillWidth: true
-
-                            Text {
-                                text: "  " + (folderModel.count > 0 && root.selectedFolderId !== ""
-                                    ? (function() {
-                                        for (var i = 0; i < folderModel.count; i++) {
-                                            if (folderModel.get(i).id === root.selectedFolderId)
-                                                return folderModel.get(i).display_name
-                                        }
-                                        return "Mail"
-                                      })()
-                                    : "Mail")
-                                font.family: root.monoFont
-                                font.pixelSize: 12
-                                color: root.focusPane === "msg" ? root.accentColor : "#555555"
-                                font.bold: true
-                            }
-
-                            Item { Layout.fillWidth: true }
-
-                            Text {
-                                id: inboxStatusText
-                                text: "Loading..."
-                                font.family: root.monoFont
-                                font.pixelSize: 10
-                                color: "#333333"
-                            }
-
-                            Text {
-                                text: "↻"
-                                font.family: root.monoFont
-                                font.pixelSize: 13
-                                color: "#444444"
-                                rightPadding: 8
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
-                                        keyHandler.forceActiveFocus()
-                                        inboxLoader.loadMessages()
-                                    }
-                                }
-                            }
-                        }
-
-                        // Inbox list
+                        // ── Message list panel ────────────────────────────────
                         Rectangle {
-                            Layout.fillWidth: true
+                            Layout.preferredWidth: 360
                             Layout.fillHeight: true
                             color: "#000000"
-                            border.color: "#111111"
-                            border.width: 1
-                            radius: 0
 
-                            ListView {
-                                id: inboxList
+                            ColumnLayout {
                                 anchors.fill: parent
-                                anchors.margins: 1
-                                clip: true
                                 spacing: 0
-                                currentIndex: root.focusPane === "msg" ? root.msgIndex : -1
-                                // Clamp msgIndex to valid range
-                                onCountChanged: {
-                                    if (root.msgIndex >= count && count > 0)
-                                        root.msgIndex = count - 1
-                                }
 
-                                model: ListModel { id: inboxModel }
-
-                                // Empty state
-                                Text {
-                                    anchors.centerIn: parent
-                                    visible: inboxModel.count === 0
-                                    text: inboxStatusText.text === "Loading..." ? "Loading messages..." : "No messages"
-                                    font.family: root.monoFont
-                                    font.pixelSize: 11
-                                    color: "#333"
-                                }
-
-                                delegate: Rectangle {
-                                    width: inboxList.width
-                                    height: 46
+                                // ── list header ───────────────────────────────
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 38
                                     color: "#000000"
 
                                     Rectangle {
-                                        width: parent.width
-                                        height: 1
-                                        color: "#111111"
                                         anchors.bottom: parent.bottom
+                                        width: parent.width; height: 1; color: "#111111"
                                     }
 
                                     RowLayout {
                                         anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 8
                                         spacing: 0
 
-                                        // › cursor (visible when msg pane focused and this row selected)
                                         Text {
-                                            text: (root.focusPane === "msg" && root.msgIndex === index) ? "›" : " "
+                                            text: "\uf0e0  "
                                             font.family: root.monoFont
-                                            font.pixelSize: 14
-                                            color: root.accentColor
-                                            Layout.preferredWidth: 14
-                                            leftPadding: 4
+                                            font.pixelSize: 12
+                                            color: root.focusPane === "msg" ? root.accentColor : "#3a3a3a"
                                         }
 
-                                        // Unread dot
-                                        Rectangle {
-                                            width: 5
-                                            height: 5
-                                            radius: 3
-                                            color: model.is_read ? "transparent" : root.accentColor
-                                            Layout.preferredWidth: 10
-                                            Layout.alignment: Qt.AlignVCenter
-                                        }
-
-                                        ColumnLayout {
+                                        Text {
+                                            text: (function() {
+                                                for (var i = 0; i < folderModel.count; i++) {
+                                                    if (folderModel.get(i).id === root.selectedFolderId)
+                                                        return folderModel.get(i).display_name
+                                                }
+                                                return "Inbox"
+                                            })()
+                                            font.family: root.monoFont
+                                            font.pixelSize: 12
+                                            font.bold: true
+                                            color: root.focusPane === "msg" ? root.accentColor : "#555555"
                                             Layout.fillWidth: true
-                                            Layout.fillHeight: true
-                                            spacing: 1
-                                            Layout.topMargin: 6
-                                            Layout.bottomMargin: 6
-                                            Layout.leftMargin: 4
-                                            Layout.rightMargin: 10
+                                        }
 
-                                            RowLayout {
+                                        Text {
+                                            id: inboxStatusText
+                                            text: ""
+                                            font.family: root.monoFont
+                                            font.pixelSize: 9
+                                            color: "#2a2a2a"
+                                        }
+
+                                        Text {
+                                            text: " ↻"
+                                            font.family: root.monoFont
+                                            font.pixelSize: 12
+                                            color: refreshMsgMouse.containsMouse ? root.accentColor : "#2a2a2a"
+                                            rightPadding: 4
+                                            MouseArea {
+                                                id: refreshMsgMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    keyHandler.forceActiveFocus()
+                                                    inboxLoader.loadMessages()
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── message list ──────────────────────────────
+                                ListView {
+                                    id: inboxList
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    clip: true
+                                    spacing: 0
+                                    currentIndex: root.focusPane === "msg" ? root.msgIndex : -1
+
+                                    onCountChanged: {
+                                        if (root.msgIndex >= count && count > 0)
+                                            root.msgIndex = count - 1
+                                    }
+
+                                    model: ListModel { id: inboxModel }
+
+                                    // empty state
+                                    Text {
+                                        anchors.centerIn: parent
+                                        visible: inboxModel.count === 0
+                                        text: inboxStatusText.text.length > 0 && inboxStatusText.text !== "…"
+                                              ? inboxStatusText.text : "no messages"
+                                        font.family: root.monoFont
+                                        font.pixelSize: 11
+                                        color: "#2a2a2a"
+                                    }
+
+                                    delegate: Rectangle {
+                                        id: msgRow
+                                        width: inboxList.width
+                                        height: 54
+                                        color: "#000000"
+
+                                        property bool isActive: root.focusPane === "msg" && root.msgIndex === index
+
+                                        // active selection bar (left edge)
+                                        Rectangle {
+                                            visible: parent.isActive
+                                            anchors.left: parent.left
+                                            anchors.top: parent.top
+                                            anchors.bottom: parent.bottom
+                                            width: 2
+                                            color: root.accentColor
+                                        }
+
+                                        // unread accent: left fill strip
+                                        Rectangle {
+                                            visible: !model.is_read && !parent.isActive
+                                            anchors.left: parent.left
+                                            anchors.top: parent.top
+                                            anchors.bottom: parent.bottom
+                                            width: 2
+                                            color: Qt.rgba(0.49, 0.42, 0.97, 0.45)
+                                        }
+
+                                        // bottom separator
+                                        Rectangle {
+                                            anchors.bottom: parent.bottom
+                                            width: parent.width; height: 1; color: "#0d0d0d"
+                                        }
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 10
+                                            anchors.rightMargin: 8
+                                            anchors.topMargin: 7
+                                            anchors.bottomMargin: 7
+                                            spacing: 6
+
+                                            // › cursor
+                                            Text {
+                                                text: parent.parent.isActive ? "›" : " "
+                                                font.family: root.monoFont
+                                                font.pixelSize: 14
+                                                color: root.accentColor
+                                                Layout.preferredWidth: 12
+                                            }
+
+                                            // unread dot
+                                            Rectangle {
+                                                width: 5; height: 5; radius: 3
+                                                color: model.is_read ? "transparent" : root.accentColor
+                                                Layout.preferredWidth: 8
+                                                Layout.alignment: Qt.AlignVCenter
+                                            }
+
+                                            ColumnLayout {
                                                 Layout.fillWidth: true
-                                                spacing: 0
+                                                Layout.fillHeight: true
+                                                spacing: 3
 
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 0
+
+                                                    // sender
+                                                    Text {
+                                                        text: model.from_name !== "" ? model.from_name : model.from_email
+                                                        font.family: root.monoFont
+                                                        font.pixelSize: 12
+                                                        font.bold: !model.is_read
+                                                        color: model.is_read ? "#555555" : root.textColor
+                                                        elide: Text.ElideRight
+                                                        Layout.fillWidth: true
+                                                    }
+
+                                                    // date
+                                                    Text {
+                                                        text: {
+                                                            var s = model.received_at || ""
+                                                            if (s.length >= 10) {
+                                                                var d = new Date(s)
+                                                                var now = new Date()
+                                                                if (d.toDateString() === now.toDateString())
+                                                                    return s.substring(11, 16)
+                                                                return s.substring(5, 10)
+                                                            }
+                                                            return s.substring(0, 10)
+                                                        }
+                                                        font.family: root.monoFont
+                                                        font.pixelSize: 10
+                                                        color: "#2a2a2a"
+                                                    }
+                                                }
+
+                                                // subject
                                                 Text {
-                                                    text: model.from_name !== "" ? model.from_name : model.from_email
+                                                    text: model.subject || "(no subject)"
                                                     font.family: root.monoFont
                                                     font.pixelSize: 11
-                                                    font.bold: !model.is_read
-                                                    color: model.is_read ? "#555555" : "#cccccc"
+                                                    color: model.is_read ? "#333333" : "#888888"
                                                     elide: Text.ElideRight
                                                     Layout.fillWidth: true
                                                 }
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                root.focusPane = "msg"
+                                                root.msgIndex = index
+                                                keyHandler.forceActiveFocus()
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // async data loader
+                            Item {
+                                id: inboxLoader
+
+                                function loadMessages() {
+                                    inboxStatusText.text = "…"
+                                    var xhr = new XMLHttpRequest()
+                                    xhr.onreadystatechange = function() {
+                                        if (xhr.readyState !== XMLHttpRequest.DONE) return
+                                        if (xhr.status === 200) {
+                                            try {
+                                                var messages = JSON.parse(xhr.responseText)
+                                                inboxModel.clear()
+                                                for (var i = 0; i < messages.length; i++)
+                                                    inboxModel.append(messages[i])
+                                                inboxStatusText.text = messages.length + ""
+                                            } catch(e) {
+                                                inboxStatusText.text = "err"
+                                            }
+                                        } else {
+                                            inboxStatusText.text = xhr.status === 0 ? "" : "e" + xhr.status
+                                        }
+                                    }
+                                    var url = "http://127.0.0.1:27182/messages"
+                                    if (root.selectedFolderId !== "")
+                                        url += "?folder_id=" + encodeURIComponent(root.selectedFolderId)
+                                    xhr.open("GET", url)
+                                    xhr.send()
+                                }
+
+                                Component.onCompleted: loadMessages()
+                            }
+
+                            // reload on folder change
+                            Connections {
+                                target: root
+                                function onSelectedFolderIdChanged() { inboxLoader.loadMessages() }
+                            }
+                        }
+
+                        // vertical divider
+                        Rectangle {
+                            Layout.fillHeight: true
+                            width: 1; color: "#111111"
+                        }
+
+                        // ── Reading pane ──────────────────────────────────────
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            color: "#000000"
+
+                            // no selection placeholder
+                            ColumnLayout {
+                                anchors.centerIn: parent
+                                spacing: 6
+                                visible: root.msgIndex < 0 || inboxModel.count === 0
+
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: "\uf0e0"
+                                    font.family: root.monoFont
+                                    font.pixelSize: 32
+                                    color: "#1a1a1a"
+                                }
+                                Text {
+                                    Layout.alignment: Qt.AlignHCenter
+                                    text: "select a message"
+                                    font.family: root.monoFont
+                                    font.pixelSize: 11
+                                    color: "#1a1a1a"
+                                }
+                            }
+
+                            // reading pane content
+                            ColumnLayout {
+                                anchors.fill: parent
+                                spacing: 0
+                                visible: root.msgIndex >= 0 && inboxModel.count > root.msgIndex
+
+                                property var msg: inboxModel.count > root.msgIndex && root.msgIndex >= 0
+                                                  ? inboxModel.get(root.msgIndex) : null
+
+                                // ── message header ────────────────────────────
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: readingHeader.implicitHeight + 20
+                                    color: "#000000"
+
+                                    Rectangle {
+                                        anchors.bottom: parent.bottom
+                                        width: parent.width; height: 1; color: "#111111"
+                                    }
+
+                                    ColumnLayout {
+                                        id: readingHeader
+                                        anchors.left: parent.left
+                                        anchors.right: parent.right
+                                        anchors.top: parent.top
+                                        anchors.margins: 16
+                                        anchors.topMargin: 12
+                                        spacing: 5
+
+                                        // subject
+                                        Text {
+                                            text: (parent.parent.parent.msg || {}).subject || "(no subject)"
+                                            font.family: root.monoFont
+                                            font.pixelSize: 15
+                                            font.bold: true
+                                            color: root.textColor
+                                            wrapMode: Text.WordWrap
+                                            Layout.fillWidth: true
+                                        }
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 6
+
+                                            // sender name chip
+                                            Rectangle {
+                                                color: Qt.rgba(0.49, 0.42, 0.97, 0.12)
+                                                border.color: Qt.rgba(0.49, 0.42, 0.97, 0.35)
+                                                border.width: 1
+                                                height: 20
+                                                width: senderChipText.implicitWidth + 14
 
                                                 Text {
-                                                    text: model.received_at.substring(0, 10)
+                                                    id: senderChipText
+                                                    anchors.centerIn: parent
+                                                    text: {
+                                                        var m = parent.parent.parent.parent.msg || {}
+                                                        return m.from_name || m.from_email || ""
+                                                    }
                                                     font.family: root.monoFont
                                                     font.pixelSize: 10
-                                                    color: "#333333"
+                                                    color: root.accentColor
                                                 }
                                             }
 
                                             Text {
-                                                text: model.subject
+                                                text: {
+                                                    var m = parent.parent.parent.msg || {}
+                                                    var s = m.from_email || ""
+                                                    return s.length > 0 ? "‹" + s + "›" : ""
+                                                }
                                                 font.family: root.monoFont
-                                                font.pixelSize: 11
-                                                color: model.is_read ? "#333333" : "#666666"
+                                                font.pixelSize: 10
+                                                color: "#333333"
                                                 elide: Text.ElideRight
                                                 Layout.fillWidth: true
                                             }
-                                        }
-                                    }
 
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            root.focusPane = "msg"
-                                            root.msgIndex = index
-                                            keyHandler.forceActiveFocus()
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Async loader: fires on component ready, populates inboxModel
-                        Item {
-                            id: inboxLoader
-
-                            function loadMessages() {
-                                inboxStatusText.text = "Loading..."
-                                var xhr = new XMLHttpRequest()
-                                xhr.onreadystatechange = function() {
-                                    if (xhr.readyState !== XMLHttpRequest.DONE) return
-                                    if (xhr.status === 200) {
-                                        try {
-                                            var messages = JSON.parse(xhr.responseText)
-                                            inboxModel.clear()
-                                            for (var i = 0; i < messages.length; i++) {
-                                                inboxModel.append(messages[i])
+                                            Text {
+                                                text: {
+                                                    var m = parent.parent.parent.msg || {}
+                                                    var s = m.received_at || ""
+                                                    if (s.length >= 16) return s.substring(0, 16).replace("T", "  ")
+                                                    return s.substring(0, 10)
+                                                }
+                                                font.family: root.monoFont
+                                                font.pixelSize: 10
+                                                color: "#2a2a2a"
                                             }
-                                            inboxStatusText.text = messages.length + " messages"
-                                            console.log("[Inbox] Loaded", messages.length, "messages")
-                                        } catch(e) {
-                                            inboxStatusText.text = "Parse error"
-                                            console.log("[Inbox] Parse error:", e)
                                         }
-                                    } else {
-                                        inboxStatusText.text = "Error " + xhr.status
-                                        console.log("[Inbox] HTTP error:", xhr.status)
+
+                                        // to / cc line
+                                        Text {
+                                            visible: text.length > 0
+                                            text: {
+                                                var m = parent.parent.parent.msg || {}
+                                                var to = m.to_recipients || m.to || ""
+                                                return to.length > 0 ? "to  " + to : ""
+                                            }
+                                            font.family: root.monoFont
+                                            font.pixelSize: 10
+                                            color: "#2a2a2a"
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
                                     }
                                 }
-                                var url = "http://127.0.0.1:27182/messages"
-                                if (root.selectedFolderId !== "") {
-                                    url += "?folder_id=" + encodeURIComponent(root.selectedFolderId)
+
+                                // ── action bar ────────────────────────────────
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 32
+                                    color: "#000000"
+
+                                    Rectangle {
+                                        anchors.bottom: parent.bottom
+                                        width: parent.width; height: 1; color: "#0d0d0d"
+                                    }
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 14
+                                        anchors.rightMargin: 14
+                                        spacing: 6
+
+                                        // Reply
+                                        Rectangle {
+                                            height: 22; width: replyLbl.implicitWidth + 18
+                                            color: "transparent"
+                                            border.color: replyActMouse.containsMouse ? root.accentColor : "#1e1e1e"
+                                            border.width: 1
+
+                                            Text {
+                                                id: replyLbl
+                                                anchors.centerIn: parent
+                                                text: "\uf112  reply"
+                                                font.family: root.monoFont
+                                                font.pixelSize: 10
+                                                color: replyActMouse.containsMouse ? root.accentColor : "#3a3a3a"
+                                            }
+                                            MouseArea {
+                                                id: replyActMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                            }
+                                        }
+
+                                        // Forward
+                                        Rectangle {
+                                            height: 22; width: fwdLbl.implicitWidth + 18
+                                            color: "transparent"
+                                            border.color: fwdActMouse.containsMouse ? root.accentColor : "#1e1e1e"
+                                            border.width: 1
+
+                                            Text {
+                                                id: fwdLbl
+                                                anchors.centerIn: parent
+                                                text: "\uf064  forward"
+                                                font.family: root.monoFont
+                                                font.pixelSize: 10
+                                                color: fwdActMouse.containsMouse ? root.accentColor : "#3a3a3a"
+                                            }
+                                            MouseArea {
+                                                id: fwdActMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                            }
+                                        }
+
+                                        Item { Layout.fillWidth: true }
+
+                                        // read/unread toggle
+                                        Text {
+                                            property var msg: inboxModel.count > root.msgIndex && root.msgIndex >= 0
+                                                              ? inboxModel.get(root.msgIndex) : null
+                                            text: (msg && msg.is_read) ? "\uf2e5  mark unread" : "\uf2e7  mark read"
+                                            font.family: root.monoFont
+                                            font.pixelSize: 10
+                                            color: markReadMouse.containsMouse ? root.accentColor : "#2a2a2a"
+                                            MouseArea {
+                                                id: markReadMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                            }
+                                        }
+                                    }
                                 }
-                                xhr.open("GET", url)
-                                xhr.send()
+
+                                // ── body ──────────────────────────────────────
+                                ScrollView {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    clip: true
+                                    ScrollBar.vertical.policy: ScrollBar.AsNeeded
+                                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                                    Text {
+                                        width: parent.parent.width - 32
+                                        anchors.left: parent.left
+                                        anchors.leftMargin: 16
+                                        topPadding: 14
+                                        bottomPadding: 24
+
+                                        text: {
+                                            var m = parent.parent.parent.parent.msg || {}
+                                            return m.body_preview || m.body || m.snippet || ""
+                                        }
+                                        font.family: root.monoFont
+                                        font.pixelSize: 12
+                                        color: "#aaaaaa"
+                                        wrapMode: Text.WordWrap
+                                        lineHeight: 1.5
+                                        textFormat: Text.PlainText
+                                    }
+                                }
                             }
-
-                            Component.onCompleted: loadMessages()
                         }
+                    }
+                }
 
-                        // Reload messages when folder selection changes
-                        Connections {
-                            target: root
-                            function onSelectedFolderIdChanged() { inboxLoader.loadMessages() }
-                        }
+                // ── Calendar view component ──────────────────────────────
+                Component {
+                    id: calendarViewComponent
+                    CalendarView {
+                        monoFont:     root.monoFont
+                        accentColor:  root.accentColor
+                        successColor: root.successColor
+                        dangerColor:  root.dangerColor
+                        textColor:    root.textColor
+                    }
+                }
+
+                // ── People view component ────────────────────────────────
+                Component {
+                    id: peopleViewComponent
+                    PeopleView {
+                        monoFont:     root.monoFont
+                        accentColor:  root.accentColor
+                        successColor: root.successColor
+                        dangerColor:  root.dangerColor
+                        textColor:    root.textColor
+                    }
+                }
+
+                // ── Tasks view component ─────────────────────────────────
+                Component {
+                    id: tasksViewComponent
+                    TasksView {
+                        monoFont:     root.monoFont
+                        accentColor:  root.accentColor
+                        successColor: root.successColor
+                        dangerColor:  root.dangerColor
+                        textColor:    root.textColor
                     }
                 }
                 // Settings view component

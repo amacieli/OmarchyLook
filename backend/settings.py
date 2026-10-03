@@ -1,4 +1,4 @@
-"""Settings manager for omarchy-look with file watching and QML bindings."""
+"""Settings manager for omarchylook with file watching and QML bindings."""
 import logging
 from pathlib import Path
 from typing import Any, Optional

@@ -20,7 +20,7 @@ class AuthManager:
     # No app registration required; works for any Microsoft 365 account
     PUBLIC_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
 
-    KEYRING_SERVICE = "omarchy-look"
+    KEYRING_SERVICE = "omarchylook"
     KEYRING_ACCOUNT = "auth_cache"
 
     def __init__(self):

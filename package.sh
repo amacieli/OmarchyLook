@@ -38,7 +38,7 @@ case "$PACKAGE_TYPE" in
         echo "Steps:"
         echo "  1. Build release binary: ./build.sh --release"
         echo "  2. Create AppImage structure with embedded Qt"
-        echo "  3. Output: omarchy-look-$VERSION.AppImage"
+        echo "  3. Output: omarchylook-$VERSION.AppImage"
         echo ""
         echo "Dependencies: linuxdeploy, linuxdeploy-plugin-qt, appimagetool"
         ;;
@@ -50,7 +50,7 @@ case "$PACKAGE_TYPE" in
         echo "Workflow:"
         echo "  1. Create aur/ directory with PKGBUILD, .SRCINFO"
         echo "  2. Push to AUR: git push aur"
-        echo "  3. Users can: yay -S omarchy-look"
+        echo "  3. Users can: yay -S omarchylook"
         ;;
     
     pacman)
@@ -58,7 +58,7 @@ case "$PACKAGE_TYPE" in
         echo "Placeholder: Arch/Manjaro .pkg.tar.zst"
         echo "Steps:"
         echo "  1. Generate from PKGBUILD: makepkg -si"
-        echo "  2. Output: omarchy-look-$VERSION-1-x86_64.pkg.tar.zst"
+        echo "  2. Output: omarchylook-$VERSION-1-x86_64.pkg.tar.zst"
         echo "  3. Optional: Host on custom repo"
         ;;
     
@@ -70,20 +70,20 @@ case "$PACKAGE_TYPE" in
         echo "  ├── control         # Package metadata"
         echo "  ├── changelog       # Version history"
         echo "  ├── rules           # Build rules"
-        echo "  └── omarchy-look.install"
+        echo "  └── omarchylook.install"
         echo ""
         echo "Build: dpkg-buildpackage -us -uc"
-        echo "Output: omarchy-look_$VERSION_amd64.deb"
+        echo "Output: omarchylook_$VERSION_amd64.deb"
         ;;
     
     rpm)
         echo -e "${BLUE}🔴 RPM Package${NC}"
         echo "Placeholder: Fedora/RHEL/openSUSE .rpm"
         echo "Structure:"
-        echo "  omarchy-look.spec"
+        echo "  omarchylook.spec"
         echo ""
-        echo "Build: rpmbuild -ba omarchy-look.spec"
-        echo "Output: omarchy-look-$VERSION-1.fc*.x86_64.rpm"
+        echo "Build: rpmbuild -ba omarchylook.spec"
+        echo "Output: omarchylook-$VERSION-1.fc*.x86_64.rpm"
         ;;
     
     all)

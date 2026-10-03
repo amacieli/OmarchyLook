@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run script for OmarchyLook (Rust + QML)
+# Run script for OmarchyLook (Rust backend + QML UI hosted by Quickshell)
 # Usage: ./run.sh [--release] [--dev] [--qml-dir <path>]
 #
 # Features:
@@ -24,9 +24,10 @@ NC='\033[0m' # No Color
 # Defaults
 BUILD_TYPE="debug"
 DEV_MODE=false
-QML_DIR="qml"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_DIR"
+QML_DIR="$PROJECT_DIR/qml"
 BINARY=""
-PROJECT_DIR=$(pwd)
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -51,12 +52,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Determine binary path
-if [ "$BUILD_TYPE" = "release" ]; then
-    BINARY="$PROJECT_DIR/target/release/omarchy-look"
-else
-    BINARY="$PROJECT_DIR/target/debug/omarchy-look"
-fi
+# Determine binary path. The cargo target dir is configured outside the
+# project (.cargo/config.toml), so ask cargo instead of assuming ./target.
+TARGET_DIR="$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+    | grep -o '"target_directory":"[^"]*"' | cut -d'"' -f4)"
+TARGET_DIR="${TARGET_DIR:-$PROJECT_DIR/target}"
+BINARY="$TARGET_DIR/$BUILD_TYPE/omarchylook"
 
 # Check if binary exists
 if [ ! -f "$BINARY" ]; then
@@ -107,8 +108,7 @@ echo ""
 # Set environment variables for the binary
 export QML_DIR="$QML_DIR"
 export RUST_LOG="${RUST_LOG:-omarchy_look=debug,info}"
-export QML_XHR_ALLOW_FILE_READ=1
 
 # Run the binary
-# The binary handles Qt/QML initialization and loads from QML_DIR
+# The binary starts the backend, then launches the UI with `quickshell -p $QML_DIR`
 exec "$BINARY"

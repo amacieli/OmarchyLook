@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "omarchy-look"
+name = "omarchylook"
 version = "0.1.0"
 description = "Omarchy-style QML Outlook clone using Microsoft Graph"
 requires-python = ">=3.10"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Entry point for omarchy-look."""
+"""Entry point for omarchylook."""
 import sys
 import os
 import logging
@@ -26,13 +26,13 @@ def main():
     env_path = Path(__file__).parent / ".env"
     load_dotenv(env_path)
 
-    logger.info("Starting omarchy-look...")
+    logger.info("Starting omarchylook...")
 
     # Initialize Qt application
     app = QApplication(sys.argv)
 
     # Set app metadata
-    app.setApplicationName("omarchy-look")
+    app.setApplicationName("omarchylook")
     app.setApplicationVersion("0.1.0")
 
     # Initialize authentication (no credentials needed; uses public client ID)

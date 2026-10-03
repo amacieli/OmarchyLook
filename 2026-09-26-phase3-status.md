@@ -49,7 +49,7 @@ Phase 3 **COMPLETE (Partial Delivery)**: Qt/QML frontend initialization and app 
 ### ✅ COMPLETED: Environment & Build Integration
 **File:** `run.sh`  
 **Status:** Already handled QML_DIR correctly; no changes needed  
-**Binary:** `target/debug/omarchy-look` (after `cargo build`)
+**Binary:** `target/debug/omarchylook` (after `cargo build`)
 
 **Build Status:** All dependencies met
 - Qt 6 libraries present at `/usr/lib/qt6/bin/qmlscene`
@@ -182,7 +182,7 @@ cargo build
 /usr/lib/qt6/bin/qmlscene qml/main.qml
 
 # View logs in real-time
-RUST_LOG=omarchy_look=debug ./target/debug/omarchy-look
+RUST_LOG=omarchy_look=debug ./target/debug/omarchylook
 ```
 
 ---

@@ -1,0 +1,4 @@
+module OmarchyLook
+CalendarView 1.0 CalendarView.qml
+PeopleView   1.0 PeopleView.qml
+TasksView    1.0 TasksView.qml

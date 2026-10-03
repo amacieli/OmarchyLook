@@ -87,10 +87,10 @@ echo -e "\n${YELLOW}🏗️  Building ($BUILD_TYPE)...${NC}"
 
 if [ "$BUILD_TYPE" = "release" ]; then
     cargo build --release 2>&1 | tee build.log
-    BINARY="target/release/omarchy-look"
+    BINARY="/mnt/d/omarchylook-build/release/omarchylook"
 else
     cargo build 2>&1 | tee build.log
-    BINARY="target/debug/omarchy-look"
+    BINARY="/mnt/d/omarchylook-build/debug/omarchylook"
 fi
 
 # Check if build succeeded

@@ -204,7 +204,7 @@ impl EmailDaemon {
                         Err(e) => error!("DB existence check failed: {}", e),
                     }
                 }
-                debug!("Wrote batch of {} to DB (folder {})", batch.len(), folder_id);
+                // debug!("Wrote batch of {} to DB (folder {})", batch.len(), folder_id);
                 tokio::task::yield_now().await;
             }
 
@@ -223,7 +223,7 @@ impl EmailDaemon {
                     Ok(false) => {
                         self.db.insert_email(&email)?;
                         inserted += 1;
-                        debug!("Inserted email: {} from {}", email.subject, email.from);
+                        // debug!("Inserted email: {} from {}", email.subject, email.from);
                     }
                     Ok(true) => {}
                     Err(e) => error!("Failed to check email existence: {}", e),

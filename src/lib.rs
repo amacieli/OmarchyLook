@@ -28,7 +28,7 @@ use log::warn;
 /// Initialize logging for the application
 pub fn init_logging() {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "omarchy_look=debug,info");
+        std::env::set_var("RUST_LOG", "omarchylook=debug,info");
     }
     env_logger::init();
 }

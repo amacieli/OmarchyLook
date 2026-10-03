@@ -4,7 +4,7 @@
 //! - Rust backend: Auth, Graph API, SQLite cache
 //! - QML frontend: Native Qt UI with hot-reload support
 
-use omarchy_look::{init_logging, AuthManager, Database, SettingsManager, email_daemon::{EmailDaemon, DaemonConfig}, providers::graph::GraphEmailProvider};
+use omarchylook::{init_logging, AuthManager, Database, SettingsManager, email_daemon::{EmailDaemon, DaemonConfig}, providers::graph::GraphEmailProvider};
 use log::{debug, error, info, warn};
 use std::env;
 use std::path::PathBuf;
@@ -77,75 +77,92 @@ fn get_config_dir() -> PathBuf {
     }
 }
 
-/// Launch the QML application window
+/// Directory holding the Omarchy shell UI kit (`Commons/`, `Ui/`).
+const OMARCHY_KIT_DIR: &str = "/usr/share/omarchy/shell";
+
+/// Locate the QML app directory: `QML_DIR` env, then `./qml`, then the
+/// `qml/` next to the sources this binary was built from (so it also works
+/// when launched from the app menu with an arbitrary cwd).
+fn resolve_qml_dir() -> PathBuf {
+    if let Ok(dir) = env::var("QML_DIR") {
+        return PathBuf::from(dir);
+    }
+    let cwd_qml = PathBuf::from("qml");
+    if cwd_qml.join("shell.qml").exists() {
+        return cwd_qml;
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("qml")
+}
+
+/// The UI is built on the Omarchy shell kit (`qs.Commons`, `qs.Ui`). Quickshell
+/// resolves `qs.*` relative to the config root, so link the installed kit into
+/// the QML dir (idempotent; the links are git-ignored).
+fn ensure_omarchy_kit(qml_dir: &PathBuf) -> std::io::Result<()> {
+    use std::os::unix::fs::symlink;
+    for name in ["Commons", "Ui"] {
+        let target = PathBuf::from(OMARCHY_KIT_DIR).join(name);
+        if !target.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{} not found - OmarchyLook needs the Omarchy shell UI kit", target.display()),
+            ));
+        }
+        let link = qml_dir.join(name);
+        if link.symlink_metadata().is_err() {
+            symlink(&target, &link)?;
+            debug!("Linked {} -> {}", link.display(), target.display());
+        }
+    }
+    Ok(())
+}
+
+/// Launch the QML application window (Quickshell used as a standalone Qt Quick host).
 fn launch_qml_app(config_dir: &PathBuf) {
     use std::process::{Command, Stdio};
-    
-    info!("Launching Qt/QML runtime...");
-    
-    // Determine QML directory: prefer QML_DIR env var, then fall back to project root
-    let qml_dir = if let Ok(qml_env) = env::var("QML_DIR") {
-        PathBuf::from(qml_env)
-    } else {
-        // Fallback: look for qml/ in the project root (parent of src/ or current directory)
-        PathBuf::from("qml")
-    };
-    
+
+    info!("Launching Quickshell UI...");
+
+    let qml_dir = resolve_qml_dir();
     info!("QML directory: {}", qml_dir.display());
-    
-    // Check if main.qml exists
-    let main_qml = qml_dir.join("main.qml");
-    if !main_qml.exists() {
-        eprintln!("❌ QML file not found: {}", main_qml.display());
-        eprintln!("   Create qml/main.qml before running");
+
+    let shell_qml = qml_dir.join("shell.qml");
+    if !shell_qml.exists() {
+        eprintln!("❌ QML entry point not found: {}", shell_qml.display());
         std::process::exit(1);
     }
-    
-    // Write a qml-config.json file so QML can read the config directory path
-    let qml_config_file = config_dir.join("qml-config.json");
-    let qml_config = format!(r#"{{"configDir":"{}"}}"#, config_dir.display());
-    if let Err(e) = std::fs::write(&qml_config_file, &qml_config) {
-        warn!("Failed to write QML config file: {}", e);
-    } else {
-        debug!("QML config written to: {}", qml_config_file.display());
+
+    if let Err(e) = ensure_omarchy_kit(&qml_dir) {
+        eprintln!("❌ {}", e);
+        eprintln!("   Install/upgrade Omarchy (pacman -Q omarchy) so {} exists", OMARCHY_KIT_DIR);
+        std::process::exit(1);
     }
-    
-    // Launch qml command (modern Qt 6.11+ tool, replaces deprecated qmlscene)
-    // The /usr/lib/qt6/bin/qml command is the modern replacement for qmlscene.
-    // It is the officially supported way to run QML applications in Qt 6.
-    // Future versions of Qt will continue to support this tool.
-    let qml_binary = "/usr/lib/qt6/bin/qml";
-    
-    let mut cmd = Command::new(qml_binary);
-    cmd.arg(main_qml.to_str().unwrap())
+
+    // `quickshell -p <dir>` runs <dir>/shell.qml as its own instance, independent
+    // of the running omarchy-shell. CONFIG_DIR tells the UI where the backend
+    // writes auth_state.json / device_code.json.
+    let mut cmd = Command::new("quickshell");
+    cmd.arg("-p").arg(&qml_dir)
         .env("QML_DIR", &qml_dir)
         .env("CONFIG_DIR", config_dir.to_str().unwrap())
-        .env("RUST_LOG", "omarchy_look=debug,info")
-        .env("QML_XHR_ALLOW_FILE_READ", "1") // Allow local file reads in QML
-        .env("XDG_RUNTIME_DIR", env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string()))
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    
-    debug!("Launching QML with CONFIG_DIR={}", config_dir.display());
-    debug!("Launching QML with QML_XHR_ALLOW_FILE_READ=1");
-    
-    // Attempt to launch qml
+
     match cmd.status() {
         Ok(status) => {
             if !status.success() {
-                eprintln!("⚠️  QML process exited with status: {}", status);
+                eprintln!("⚠️  Quickshell exited with status: {}", status);
             }
-            info!("Qt/QML window closed");
+            info!("UI window closed");
         }
         Err(e) => {
-            eprintln!("❌ Failed to launch Qt/QML: {}", e);
-            eprintln!("   Ensure Qt 6 is installed: sudo apt install qt6-qml qt6-declarative");
+            eprintln!("❌ Failed to launch quickshell: {}", e);
+            eprintln!("   Install it with: pacman -S quickshell");
             std::process::exit(1);
         }
     }
 }
 
-fn initialize_app(config_dir: &PathBuf, db_path: &str, settings_path: &str) -> omarchy_look::errors::Result<()> {
+fn initialize_app(config_dir: &PathBuf, db_path: &str, settings_path: &str) -> omarchylook::errors::Result<()> {
     // Initialize database
     let db = Arc::new(Database::open(db_path)?);
     info!("Database initialized");
@@ -391,7 +408,7 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     let settings_path = config_dir.join("settings.toml");
                     let body = match std::fs::read_to_string(&settings_path)
                         .ok()
-                        .and_then(|s| toml::from_str::<omarchy_look::models::Settings>(&s).ok())
+                        .and_then(|s| toml::from_str::<omarchylook::models::Settings>(&s).ok())
                     {
                         Some(settings) => format!(
                             "{{\"sidebar_expanded\":{},\"window_width\":{},\"window_height\":{}}}",
@@ -419,7 +436,7 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     let settings_path = config_dir.join("settings.toml");
                     let result = std::fs::read_to_string(&settings_path)
                         .ok()
-                        .and_then(|s| toml::from_str::<omarchy_look::models::Settings>(&s).ok())
+                        .and_then(|s| toml::from_str::<omarchylook::models::Settings>(&s).ok())
                         .map(|mut settings| {
                             settings.ui.sidebar_expanded = expanded;
                             toml::to_string_pretty(&settings)
@@ -513,7 +530,7 @@ fn start_email_daemon_thread(config_dir: &PathBuf) {
     rt.block_on(async {
         // Create the email provider (Graph API)
         let auth = AuthManager::new();
-        let provider = Arc::new(omarchy_look::providers::graph::GraphEmailProvider::new(auth));
+        let provider = Arc::new(omarchylook::providers::graph::GraphEmailProvider::new(auth));
         
         // Open database (will be accessed synchronously from blocking context)
         let db_path = config_dir_clone.join("messages.db");

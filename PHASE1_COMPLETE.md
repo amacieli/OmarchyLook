@@ -56,7 +56,7 @@
 ### Cargo Configuration
 
 #### `Cargo.toml` (1.22 KB)
-- **Binary name**: `omarchy-look`
+- **Binary name**: `omarchylook`
 - **Edition**: 2021
 - **Dependencies**:
   - **HTTP**: `ureq` (sync/blocking, no Tokio)
@@ -86,7 +86,7 @@
 
 #### `src/main.rs`
 - Application entry point
-- XDG config directory support (`~/.config/omarchy-look`)
+- XDG config directory support (`~/.config/omarchylook`)
 - Database and settings initialization
 - Auth state check (demonstrates backend readiness)
 
@@ -274,19 +274,19 @@ cd /mnt/ai/projects/omarchylook
 
 ## Configuration
 
-Settings are stored in `~/.config/omarchy-look/settings.toml` and automatically reload on change.
+Settings are stored in `~/.config/omarchylook/settings.toml` and automatically reload on change.
 
 To adjust sync interval:
 ```bash
 # Edit settings.toml
-nano ~/.config/omarchy-look/settings.toml
+nano ~/.config/omarchylook/settings.toml
 
 # Change:
 # [sync]
 # poll_interval_secs = 120  (was 60)
 ```
 
-Database is at `~/.config/omarchy-look/omarchy.db` (SQLite).
+Database is at `~/.config/omarchylook/omarchy.db` (SQLite).
 
 ## Performance Notes
 

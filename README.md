@@ -17,7 +17,7 @@ A native Linux desktop email/calendar/contacts/tasks client built in **Qt/QML**,
 ## Project Structure
 
 ```
-omarchy-look/
+omarchylook/
 ├── main.py                  # Entry point
 ├── pyproject.toml          # Dependencies
 ├── qml/                    # QML UI layer
@@ -40,7 +40,7 @@ omarchy-look/
 
 1. **Clone and set up environment**
    ```bash
-   cd /mnt/ai/projects/omarchy-look
+   cd /mnt/ai/projects/omarchylook
    ./setup.sh
    ```
 
@@ -58,7 +58,7 @@ omarchy-look/
 
 ## Documentation
 
-Internal planning docs (design, phased roadmap, initial spec) are in `/mnt/ai/projects/omarchy-look-internal/` to keep this repo clean.
+Internal planning docs (design, phased roadmap, initial spec) are in `/mnt/ai/projects/omarchylook-internal/` to keep this repo clean.
 
 ## Authentication Flow
 

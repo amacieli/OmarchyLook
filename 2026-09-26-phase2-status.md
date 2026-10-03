@@ -74,7 +74,7 @@
 ### Validation
 ```
 $ cargo check
-Checking omarchy-look v0.1.0 (/mnt/ai/projects/omarchylook)
+Checking omarchylook v0.1.0 (/mnt/ai/projects/omarchylook)
 ...
 Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.77s
 ```

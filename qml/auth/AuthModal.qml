@@ -1,0 +1,171 @@
+import QtQuick
+import QtQuick.Layouts
+import qs.Commons
+import qs.Ui
+import "../common"
+
+// Device-code login overlay. Same visual recipe as the kit's ConfirmDialog
+// (scrim + accent-bordered card); its content is ours because ConfirmDialog
+// only supports a message and two buttons.
+Item {
+  id: root
+
+  required property var auth
+
+  visible: auth.showModal
+
+  Rectangle {
+    anchors.fill: parent
+    color: Util.alpha(Color.background, 0.7)
+
+    MouseArea { anchors.fill: parent; onClicked: root.auth.cancel() }
+
+    BorderSurface {
+      id: card
+      anchors.centerIn: parent
+      width: Math.min(parent.width - Style.space(60), Style.space(520))
+      height: content.implicitHeight + card.contentTopInset + card.contentBottomInset
+      color: Color.background
+      padding: Style.space(18)
+      radius: Style.cornerRadius
+      borderSpec: Border.flat(Color.accent, Style.normalBorderWidth)
+
+      MouseArea { anchors.fill: parent }   // swallow clicks so the scrim doesn't cancel
+
+      ColumnLayout {
+        id: content
+        anchors.fill: parent
+        anchors.topMargin: card.contentTopInset
+        anchors.leftMargin: card.contentLeftInset
+        anchors.rightMargin: card.contentRightInset
+        spacing: Style.spacing.xxxl
+
+        UiText {
+          Layout.fillWidth: true
+          text: "Microsoft Authentication"
+          horizontalAlignment: Text.AlignHCenter
+          foreground: Color.accent
+          font.pixelSize: Style.font.title
+          font.bold: true
+        }
+
+        // waiting for code
+        ColumnLayout {
+          Layout.fillWidth: true
+          visible: root.auth.userCode === "" && root.auth.errorMessage === ""
+          spacing: Style.spacing.lg
+
+          UiText {
+            Layout.fillWidth: true
+            text: "Initiating device authentication…"
+            horizontalAlignment: Text.AlignHCenter
+          }
+          UiText {
+            Layout.fillWidth: true
+            text: "Waiting for Microsoft to send a code"
+            horizontalAlignment: Text.AlignHCenter
+            dim: true
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        // code received
+        ColumnLayout {
+          Layout.fillWidth: true
+          visible: root.auth.userCode !== "" && root.auth.errorMessage === ""
+          spacing: Style.spacing.lg
+
+          PanelSectionHeader { text: "1. OPEN THIS URL IN YOUR BROWSER" }
+
+          BorderSurface {
+            Layout.fillWidth: true
+            implicitHeight: urlText.implicitHeight + Style.spacing.lg * 2
+            color: "transparent"
+            radius: Style.cornerRadius
+            borderSpec: Border.controlSpec("normal", Color.foreground, Color.accent)
+
+            UiText {
+              id: urlText
+              anchors.fill: parent
+              anchors.margins: Style.spacing.lg
+              text: root.auth.verificationUri
+              foreground: Color.accent
+              elide: Text.ElideRight
+              horizontalAlignment: Text.AlignHCenter
+            }
+          }
+
+          PanelSectionHeader { text: "2. ENTER THIS CODE WHEN PROMPTED" }
+
+          BorderSurface {
+            Layout.fillWidth: true
+            implicitHeight: codeText.implicitHeight + Style.spacing.xxxl * 2
+            color: Style.selectedFillFor(Color.foreground, Color.accent)
+            radius: Style.cornerRadius
+            borderSpec: Border.flat(Color.accent, Style.normalBorderWidth)
+
+            UiText {
+              id: codeText
+              anchors.centerIn: parent
+              text: root.auth.userCode
+              font.pixelSize: Style.font.display
+              font.bold: true
+              font.letterSpacing: Style.space(6)
+            }
+          }
+
+          UiText {
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
+            text: {
+              var s = root.auth.secondsRemaining
+              var ss = s % 60
+              return "Code expires in " + Math.floor(s / 60) + ":" + (ss < 10 ? "0" + ss : ss)
+            }
+            foreground: root.auth.secondsRemaining < 60 ? Color.urgent : Color.foreground
+            dim: root.auth.secondsRemaining >= 60
+            font.pixelSize: Style.font.caption
+          }
+
+          UiText {
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
+            text: "Waiting for you to authenticate in the browser…"
+            dim: true
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        // error
+        ColumnLayout {
+          Layout.fillWidth: true
+          visible: root.auth.errorMessage !== ""
+          spacing: Style.spacing.lg
+
+          UiText {
+            Layout.fillWidth: true
+            text: root.auth.errorMessage
+            foreground: Color.urgent
+            wrapMode: Text.Wrap
+            horizontalAlignment: Text.AlignHCenter
+          }
+
+          Button {
+            Layout.fillWidth: true
+            text: "Try again"
+            iconText: "\uf021"
+            bordered: true
+            onClicked: root.auth.startLogin()
+          }
+        }
+
+        Button {
+          Layout.fillWidth: true
+          text: "Cancel"
+          bordered: true
+          onClicked: root.auth.cancel()
+        }
+      }
+    }
+  }
+}
