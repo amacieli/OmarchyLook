@@ -8,10 +8,11 @@
 //! Google's device-code flow is not usable here: it refuses Gmail/Calendar scopes.
 //!
 //! The OAuth client (a "Desktop app" client created once by the developer in Google
-//! Cloud Console, like the Azure registration for Graph) is read from
-//! `<config dir>/google_client.json` — the file Google's console offers as "Download
-//! JSON" works as-is. Desktop clients carry a client secret that Google itself documents
-//! as non-confidential, but it is still kept out of the source tree.
+//! Cloud Console, like the Azure registration for Graph) is compiled into the binary by
+//! build.rs, so end users configure nothing. `<config dir>/google_client.json` (Google's
+//! "Download JSON" file works as-is) overrides it for developers using their own project.
+//! Desktop clients carry a secret that Google documents as non-confidential; it is still
+//! kept out of the git history (build.rs reads it from a git-ignored file or env vars).
 
 use crate::errors::{OmarchyError, Result};
 use crate::models::TokenResponse;
@@ -77,15 +78,29 @@ pub fn parse_client_json(raw: &str) -> Result<GoogleClient> {
 }
 
 impl GoogleClient {
+    /// The client compiled into this binary (see build.rs), if the build had one.
+    pub fn embedded() -> Option<Self> {
+        match (option_env!("OMARCHYLOOK_GOOGLE_CLIENT_ID"), option_env!("OMARCHYLOOK_GOOGLE_CLIENT_SECRET")) {
+            (Some(id), Some(secret)) if !id.is_empty() && !secret.is_empty() => {
+                Some(Self { client_id: id.to_string(), client_secret: secret.to_string() })
+            }
+            _ => None,
+        }
+    }
+
+    /// `<config dir>/google_client.json` overrides the embedded client (developers testing their
+    /// own project); otherwise the embedded one is used, so end users need no setup.
     pub fn load(config_dir: &Path) -> Result<Self> {
         let path = config_dir.join("google_client.json");
-        let raw = std::fs::read_to_string(&path).map_err(|_| {
-            OmarchyError::AuthError(format!(
-                "Google sign-in isn't set up: save the OAuth client JSON as {}",
-                path.display()
-            ))
-        })?;
-        parse_client_json(&raw)
+        match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|r| parse_client_json(&r).map_err(|e| e.to_string())) {
+            Ok(c) => Ok(c),
+            Err(why) => Self::embedded().ok_or_else(|| {
+                OmarchyError::AuthError(format!(
+                    "Google sign-in isn't set up (this build has no embedded client and {} is unusable: {})",
+                    path.display(), why
+                ))
+            }),
+        }
     }
 }
 
@@ -363,6 +378,23 @@ mod tests {
         assert_eq!(parse_client_json(r#"{"client_id":"a","client_secret":"b"}"#).unwrap().client_id, "a");
         assert!(parse_client_json(r#"{"installed":{"client_id":"a"}}"#).is_err());
         assert!(parse_client_json("not json").is_err());
+    }
+
+    #[test]
+    fn load_prefers_the_file_then_the_embedded_client() {
+        let dir = std::env::temp_dir().join(format!("omarchylook-gclient-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_file(dir.join("google_client.json"));
+        // no file: embedded client if this build has one, else a clear error
+        match GoogleClient::embedded() {
+            Some(e) => assert_eq!(GoogleClient::load(&dir).unwrap(), e),
+            None => assert!(GoogleClient::load(&dir).is_err()),
+        }
+        std::fs::write(dir.join("google_client.json"), r#"{"installed":{"client_id":"file-id","client_secret":"file-secret"}}"#).unwrap();
+        assert_eq!(GoogleClient::load(&dir).unwrap().client_id, "file-id", "file overrides embedded");
+        std::fs::write(dir.join("google_client.json"), "garbage").unwrap();
+        assert_eq!(GoogleClient::load(&dir).ok(), GoogleClient::embedded(), "bad file falls back to embedded");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -62,3 +62,6 @@ Cargo.lock
 *.tmp
 .hermes/
 notes/
+
+# Google OAuth client (embedded into the binary at build time; never commit)
+google_client.json
