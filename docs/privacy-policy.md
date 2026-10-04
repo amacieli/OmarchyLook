@@ -1,11 +1,8 @@
 # omarchylook Privacy Policy
 
 **Effective date:** October 4, 2026
-**Applies to:** the omarchylook desktop application ("omarchylook", "the app")
+**Applies to:** the OmaLook desktop application ("omalook", "the app")
 **Source code:** https://github.com/amacieli/OmarchyLook
-
-> Boilerplate draft. Review it and replace the bracketed placeholders before submitting it
-> anywhere (for example Google's OAuth verification, which needs a public URL for this page).
 
 ## Summary
 
@@ -102,6 +99,6 @@ effective date.
 ## Contact
 
 Questions about this policy: open an issue at https://github.com/amacieli/OmarchyLook/issues or
-write to [YOUR CONTACT EMAIL].
+write to adam.macielinski@gmail.com.
 
-**Developer:** [YOUR NAME OR ORGANIZATION]
+**Developer:** Adam Macielinski
