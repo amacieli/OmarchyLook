@@ -16,6 +16,8 @@ Item {
   property string focusPane: "nav"
   property string currentView: "mail"
 
+  function fmt(n) { return Number(n).toLocaleString(Qt.locale("en_US"), "f", 0) }
+
   readonly property string hints: {
     if (focusPane === "nav")    return "j/k move   l open   s next pane   esc close"
     if (focusPane === "folder") return "j/k move   l select   h back   s next pane"
@@ -40,7 +42,7 @@ Item {
 
     UiText {
       visible: root.currentView === "mail"
-      text: root.messageCount + " messages · " + root.unreadCount + " unread"
+      text: root.fmt(root.messageCount) + (root.messageCount === 1 ? " message · " : " messages · ") + root.fmt(root.unreadCount) + " unread"
       dim: true
       font.pixelSize: Style.font.caption
     }

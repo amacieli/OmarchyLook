@@ -45,6 +45,18 @@ pub fn provider_of(account_id: &str) -> &str {
     account_id.split('-').next().unwrap_or(account_id)
 }
 
+/// Provider-supplied ids that are only unique within one mailbox (Gmail message / label ids,
+/// Google event and contact ids) are stored as `<account id>:<provider id>` so two accounts can
+/// never collide in the shared tables. Account ids contain no ':'.
+pub fn scoped(account_id: &str, raw: &str) -> String {
+    format!("{}:{}", account_id, raw)
+}
+
+/// Inverse of `scoped`; ids without this account's prefix are returned unchanged.
+pub fn unscoped<'a>(account_id: &str, id: &'a str) -> &'a str {
+    id.strip_prefix(account_id).and_then(|r| r.strip_prefix(':')).unwrap_or(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,6 +85,15 @@ mod tests {
     fn ids_are_well_distributed() {
         let ids: std::collections::HashSet<_> = (0..500).map(|_| new_account_id("exchange")).collect();
         assert!(ids.len() >= 495, "too many collisions: {}", ids.len());
+    }
+
+    #[test]
+    fn scoped_ids_round_trip_and_never_collide_across_accounts() {
+        assert_eq!(scoped("gmail-aaaaaa", "INBOX"), "gmail-aaaaaa:INBOX");
+        assert_ne!(scoped("gmail-aaaaaa", "18f3"), scoped("gmail-bbbbbb", "18f3"));
+        assert_eq!(unscoped("gmail-aaaaaa", "gmail-aaaaaa:18f3"), "18f3");
+        assert_eq!(unscoped("gmail-aaaaaa", "18f3"), "18f3");
+        assert_eq!(unscoped("gmail-aaaaaa", "gmail-bbbbbb:18f3"), "gmail-bbbbbb:18f3");
     }
 
     #[test]

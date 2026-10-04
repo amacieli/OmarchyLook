@@ -47,6 +47,30 @@ impl GraphEmailProvider {
         Ok(text)
     }
 
+    /// Full body of one message: (content type "html"|"text", content).
+    pub async fn fetch_message_body(&self, id: &str) -> Result<(String, String)> {
+        let token = self.get_token().await?;
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!(
+                "https://graph.microsoft.com/v1.0/me/messages/{}?$select=id,body",
+                urlencoding::encode(id)
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+        let body = Self::check_response(response).await?;
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+        let content_type = if json["body"]["contentType"].as_str().map(|t| t.eq_ignore_ascii_case("html")).unwrap_or(false) {
+            "html"
+        } else {
+            "text"
+        };
+        Ok((content_type.to_string(), json["body"]["content"].as_str().unwrap_or("").to_string()))
+    }
+
     /// Parse a Graph API message JSON value into an EmailMessage
     fn parse_message(msg: &serde_json::Value) -> EmailMessage {
         let id = msg["id"].as_str().unwrap_or("").to_string();
@@ -62,7 +86,9 @@ impl GraphEmailProvider {
         let preview = msg["bodyPreview"].as_str().unwrap_or("").to_string();
         let parent_folder_id = msg["parentFolderId"].as_str().map(|s| s.to_string());
 
-        EmailMessage { id, from, subject, received, body: preview, folder_id: parent_folder_id }
+        let is_read = msg["isRead"].as_bool().unwrap_or(false);
+
+        EmailMessage { id, from, subject, received, body: preview, folder_id: parent_folder_id, is_read }
     }
 }
 
@@ -166,6 +192,47 @@ impl super::EmailProvider for GraphEmailProvider {
 
         debug!("Completed full sync of folder {}: {} messages total", folder_id, total);
         Ok(total)
+    }
+
+    async fn fetch_unread_ids(&self, folder_id: &str) -> Result<Vec<String>> {
+        let token = self.get_token().await?;
+        let client = reqwest::Client::new();
+        let mut ids = Vec::new();
+        let mut next_url = Some(format!(
+            "https://graph.microsoft.com/v1.0/me/mailFolders/{}/messages?\
+             $filter=isRead eq false&$select=id&$top=1000",
+            folder_id
+        ));
+        while let Some(url) = next_url.take() {
+            let response = client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .send()
+                .await
+                .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+            let body = Self::check_response(response).await?;
+            let json: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+            if let Some(values) = json["value"].as_array() {
+                ids.extend(values.iter().filter_map(|m| m["id"].as_str().map(String::from)));
+            }
+            next_url = json["@odata.nextLink"].as_str().map(String::from);
+        }
+        Ok(ids)
+    }
+
+    async fn set_message_read(&self, id: &str, is_read: bool) -> Result<()> {
+        let token = self.get_token().await?;
+        let client = reqwest::Client::new();
+        let response = client
+            .patch(format!("https://graph.microsoft.com/v1.0/me/messages/{}", id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(format!("{{\"isRead\": {}}}", is_read))
+            .send()
+            .await
+            .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+        Self::check_response(response).await.map(|_| ())
     }
 
     /// Fetch all mail folders from Graph API

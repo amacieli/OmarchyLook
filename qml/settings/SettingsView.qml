@@ -79,6 +79,7 @@ RowLayout {
           case "account":       return accountPage
           case "appearance":    return appearancePage
           case "mail":          return mailPage
+          case "senders":       return sendersPage
           case "calendar":      return calendarPage
           case "notifications": return notificationsPage
           default:              return aboutPage
@@ -105,7 +106,8 @@ RowLayout {
       onSidebarExpandedToggled: root.app.sidebarExpanded = !root.app.sidebarExpanded
     }
   }
-  Component { id: mailPage;          MailPage {} }
+  Component { id: mailPage;          MailPage { app: root.app } }
+  Component { id: sendersPage;       SendersPage { app: root.app } }
   Component { id: calendarPage;      CalendarPage { app: root.app } }
   Component { id: notificationsPage; NotificationsPage {} }
   Component {

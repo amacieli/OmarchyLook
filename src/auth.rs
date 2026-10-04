@@ -14,11 +14,12 @@ use std::time::{SystemTime, Duration};
 const PUBLIC_CLIENT_ID: &str = "9c277d6f-edb2-4f82-bda5-901b4c11c457";
 // const TENANT_ID: &str = "common";  // Unused; part of OAuth spec but not needed for public client flow
 // Explicit Graph scopes — NOT .default. These map to the delegated permissions on the app registration.
-const GRAPH_SCOPE: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.Read https://graph.microsoft.com/Contacts.Read https://graph.microsoft.com/User.Read offline_access";
-// Scopes every account is known to have consented to. A silent refresh falls back to this set
-// when the account has not yet consented to a newer scope (e.g. Contacts.Read), so mail and
-// calendar keep working instead of the whole login being thrown away.
-const GRAPH_SCOPE_BASE: &str = "https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.Read https://graph.microsoft.com/User.Read offline_access";
+const GRAPH_SCOPE: &str = "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.ReadWrite https://graph.microsoft.com/Contacts.ReadWrite https://graph.microsoft.com/Tasks.ReadWrite https://graph.microsoft.com/User.Read offline_access";
+// Read-only fallback set (accounts that consented before the write scopes were added). A silent
+// refresh falls back to this set when the account has not yet consented to a newer scope (e.g.
+// Calendars.ReadWrite), so mail/calendar/contacts keep working read-only instead of the whole
+// login being thrown away. Mail.ReadWrite already covers Mail.Read; Mail.Send is unchanged.
+const GRAPH_SCOPE_BASE: &str = "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.Read https://graph.microsoft.com/Contacts.Read https://graph.microsoft.com/User.Read offline_access";
 const DEVICE_AUTH_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
 
@@ -78,8 +79,8 @@ impl Refresher for MsRefresher {
             if !consent_missing {
                 return outcome;
             }
-            warn!("Account has not consented to all scopes (e.g. Contacts.Read); refreshing with base scopes. \
-                   Sign in to the account again to grant them.");
+            warn!("Account has not consented to all scopes (e.g. Calendars/Contacts/Tasks ReadWrite); refreshing with read-only base scopes. \
+                   Sign in to the account again to grant write access.");
             self.full_scope_unavailable.store(true, Ordering::Relaxed);
         }
         Self::attempt(refresh_token, GRAPH_SCOPE_BASE).0
@@ -121,8 +122,14 @@ pub fn broker_for(account_id: &str) -> Arc<TokenBroker> {
     let (store, refresher): (Arc<dyn token_store::TokenStore>, Arc<dyn Refresher>) =
         (Arc::new(token_store::MemoryStore::default()), Arc::new(OfflineRefresher));
     #[cfg(not(test))]
-    let (store, refresher): (Arc<dyn token_store::TokenStore>, Arc<dyn Refresher>) =
-        (Arc::new(KeyringStore), Arc::new(MsRefresher::new()));
+    let (store, refresher): (Arc<dyn token_store::TokenStore>, Arc<dyn Refresher>) = (
+        Arc::new(KeyringStore),
+        if crate::accounts::provider_of(account_id) == "gmail" {
+            Arc::new(crate::google_auth::GoogleRefresher::new())
+        } else {
+            Arc::new(MsRefresher::new())
+        },
+    );
 
     #[cfg(not(test))]
     if account_id == DEFAULT_ACCOUNT {
@@ -556,10 +563,17 @@ mod scope_tests {
     }
 
     #[test]
-    fn full_scope_adds_contacts_to_the_base_scopes() {
+    fn full_scope_is_a_write_superset_of_the_base_scopes() {
+        let full: Vec<&str> = GRAPH_SCOPE.split(' ').collect();
         for scope in GRAPH_SCOPE_BASE.split(' ') {
-            assert!(GRAPH_SCOPE.split(' ').any(|s| s == scope), "{} missing from full scope", scope);
+            // A ReadWrite scope in the full set satisfies the matching Read scope in the base set.
+            let rw = scope.replace(".Read", ".ReadWrite");
+            assert!(full.contains(&scope) || full.contains(&rw.as_str()), "{} missing from full scope", scope);
         }
-        assert!(GRAPH_SCOPE.contains("Contacts.Read") && !GRAPH_SCOPE_BASE.contains("Contacts.Read"));
+        for w in ["Calendars.ReadWrite", "Contacts.ReadWrite", "Tasks.ReadWrite", "Mail.ReadWrite", "Mail.Send"] {
+            assert!(GRAPH_SCOPE.contains(w), "{} missing", w);
+        }
+        assert!(!GRAPH_SCOPE.contains("Mail.Read ") && !GRAPH_SCOPE_BASE.contains("Mail.Read "));
+        assert!(!GRAPH_SCOPE_BASE.contains("Tasks"));
     }
 }

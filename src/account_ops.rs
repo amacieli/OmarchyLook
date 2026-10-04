@@ -1,7 +1,7 @@
 //! Account lifecycle operations used by the HTTP layer: list, add (device-flow
 //! login under a fresh `<provider>-<suffix>` id), sign out, remove.
 
-use crate::accounts::{new_account_id, provider_slug};
+use crate::accounts::{new_account_id, provider_of, provider_slug};
 use crate::auth::{any_account_authenticated, broker_for, AuthManager};
 use crate::db::Database;
 use crate::errors::{OmarchyError, Result};
@@ -15,9 +15,13 @@ fn db_path(config_dir: &Path) -> String {
     config_dir.join("messages.db").to_string_lossy().to_string()
 }
 
-/// Email address of an account's mailbox via Graph `/me` (User.Read).
+/// Email address of an account's mailbox: Graph `/me` for Microsoft accounts, Google's
+/// userinfo endpoint for Gmail.
 pub fn fetch_account_email(account_id: &str) -> Option<String> {
     let token = AuthManager::for_account(account_id).get_token().ok()?;
+    if provider_of(account_id) == "gmail" {
+        return crate::google_auth::fetch_email(&token).ok();
+    }
     let me: serde_json::Value = ureq::get("https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName")
         .set("Authorization", &format!("Bearer {}", token))
         .call()
@@ -151,11 +155,24 @@ pub fn register_login(
     Ok(LoginOutcome::Added(id.to_string()))
 }
 
-/// Start a device-flow login for a brand-new account. The id is generated here
-/// (`<provider>-<suffix>`, even for the first account); the QML polls device_code.json.
+/// Providers a user can sign in to (sync may lag behind: see `scheduler::is_supported`).
+pub fn can_sign_in(provider: &str) -> bool {
+    is_supported(provider) || provider == "gmail"
+}
+
+/// Start a login for a brand-new account. The id is generated here
+/// (`<provider>-<suffix>`, even for the first account). Microsoft accounts use the
+/// device flow (the QML polls device_code.json); Gmail uses the browser flow
+/// (the QML shows the URL from google_login.json while the browser is open).
 pub fn begin_add_account(config_dir: &Path, provider: &str, scheduler: Arc<SyncScheduler>) -> Result<()> {
+    begin_add_account_with_hint(config_dir, provider, None, scheduler)
+}
+
+/// As `begin_add_account`; `email` is the address the user typed (Gmail: required, used as
+/// Google's `login_hint`).
+pub fn begin_add_account_with_hint(config_dir: &Path, provider: &str, email: Option<&str>, scheduler: Arc<SyncScheduler>) -> Result<()> {
     let provider = provider_slug(provider);
-    if !is_supported(&provider) {
+    if !can_sign_in(&provider) {
         let msg = format!("{} accounts aren't supported yet", provider);
         write_auth_state(config_dir, Some(&msg), None);
         return Err(OmarchyError::AuthError(msg));
@@ -164,10 +181,46 @@ pub fn begin_add_account(config_dir: &Path, provider: &str, scheduler: Arc<SyncS
     info!("Adding {} account (pending id {})", provider, id);
     write_auth_state(config_dir, None, None); // clear any stale error
 
+    if provider == "gmail" {
+        return begin_gmail_login(config_dir, &id, email, scheduler);
+    }
     let dir = config_dir.to_path_buf();
     let mut auth = AuthManager::for_account(&id);
     let cb: Box<dyn FnOnce(&str) + Send> = Box::new(move |id| finish_login(&dir, id, &provider, &scheduler));
     auth.start_device_flow_with_callback(config_dir, Some(cb)).map(|_| ())
+}
+
+fn begin_gmail_login(config_dir: &Path, id: &str, email: Option<&str>, scheduler: Arc<SyncScheduler>) -> Result<()> {
+    let fail = |msg: String| {
+        write_auth_state(config_dir, Some(&msg), None);
+        Err(OmarchyError::AuthError(msg))
+    };
+    let Some(email) = email.map(str::trim).filter(|e| crate::google_auth::looks_like_email(e)) else {
+        return fail("Enter your Gmail address first".into());
+    };
+    let pending = match crate::google_auth::start_login(config_dir, Some(email)) {
+        Ok(p) => p,
+        Err(e) => return fail(e.to_string()),
+    };
+    let (dir, id) = (config_dir.to_path_buf(), id.to_string());
+    std::thread::spawn(move || match pending.finish(&dir) {
+        Ok(login) => {
+            // Tokens go to the keyring under this login's id; finish_login then registers the
+            // account (same Added / Rebound / ConfirmReauth rules as Microsoft).
+            if let Err(e) = broker_for(&id).store_tokens(&login.tokens) {
+                error!("Gmail sign-in: could not store tokens: {}", e);
+                write_auth_state(&dir, Some("Signed in, but the token could not be saved to the keyring"), None);
+                return;
+            }
+            info!("Gmail sign-in complete for {}", login.email);
+            finish_login(&dir, &id, "gmail", &scheduler);
+        }
+        Err(e) => {
+            warn!("Gmail sign-in failed: {}", e);
+            write_auth_state(&dir, Some(&e.to_string()), None);
+        }
+    });
+    Ok(())
 }
 
 fn finish_login(config_dir: &Path, id: &str, provider: &str, scheduler: &SyncScheduler) {

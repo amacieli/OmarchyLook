@@ -32,7 +32,7 @@ pub trait CalendarProvider: Send + Sync {
 }
 
 /// Local midnight of `date` as an RFC 3339 instant with its UTC offset.
-fn local_midnight(date: NaiveDate) -> String {
+pub(crate) fn local_midnight(date: NaiveDate) -> String {
     let naive = date.and_hms_opt(0, 0, 0).expect("midnight is valid");
     match Local.from_local_datetime(&naive) {
         chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => dt.to_rfc3339(),
@@ -192,7 +192,7 @@ impl CalendarProvider for GraphCalendarProvider {
 }
 
 /// IANA time zone of this machine (from the /etc/localtime symlink), else UTC.
-fn local_time_zone() -> String {
+pub(crate) fn local_time_zone() -> String {
     std::fs::read_link("/etc/localtime")
         .ok()
         .and_then(|p| {

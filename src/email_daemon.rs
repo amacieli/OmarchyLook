@@ -154,11 +154,20 @@ impl EmailDaemon {
     /// - First run (is_initial): full paginated sync via channel, non-blocking
     /// - Subsequent runs: fetch 50 most recent per folder for incremental updates
     async fn sync_messages(&self, is_initial: bool) -> Result<usize> {
+        // Local read/unread changes go out first, so the reconcile below cannot undo them.
+        self.push_pending_reads().await;
+
         let folders = self.db.get_folders()?;
 
         if folders.is_empty() {
             // Fall back to inbox if no folders cached yet
             return self.sync_folder_messages("inbox", is_initial).await;
+        }
+
+        // Read flags first: one cheap request per folder, so they are right within seconds
+        // of launch instead of after the full paginated sync of every folder.
+        for folder in &folders {
+            self.reconcile_read_state(&folder.id, &folder.display_name).await;
         }
 
         let mut total = 0;
@@ -169,6 +178,37 @@ impl EmailDaemon {
             }
         }
         Ok(total)
+    }
+
+    /// Push read/unread changes made in the UI to the provider.
+    async fn push_pending_reads(&self) {
+        let pending = match self.db.pending_reads() {
+            Ok(p) => p,
+            Err(e) => { error!("Could not list pending read changes: {}", e); return; }
+        };
+        for (id, is_read) in pending {
+            match self.provider.set_message_read(&id, is_read).await {
+                Ok(()) => {
+                    if let Err(e) = self.db.clear_read_pending(&id, is_read) {
+                        error!("Could not clear pending flag for {}: {}", id, e);
+                    }
+                }
+                // Stays pending: retried on the next cycle.
+                Err(e) => warn!("Could not push read={} for {}: {}", is_read, id, e),
+            }
+        }
+    }
+
+    /// Bring the cached read flags of a folder in line with the provider's.
+    async fn reconcile_read_state(&self, folder_id: &str, folder_name: &str) {
+        match self.provider.fetch_unread_ids(folder_id).await {
+            Ok(unread) => match self.db.reconcile_read_state(folder_id, &unread) {
+                Ok(0) => {}
+                Ok(n) => debug!("Read state: {} message(s) updated in {}", n, folder_name),
+                Err(e) => error!("Read-state reconcile failed for {}: {}", folder_name, e),
+            },
+            Err(e) => warn!("Could not read unread list for {}: {}", folder_name, e),
+        }
     }
 
     /// Fetch and insert messages for a single folder.

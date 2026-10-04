@@ -85,6 +85,7 @@ pub struct EmailMessage {
     pub received: String,
     pub body: String,
     pub folder_id: Option<String>,
+    pub is_read: bool,
 }
 
 /// Calendar event for daemon storage (start/end are local wall-clock
@@ -151,6 +152,9 @@ pub struct ContactRow {
     pub contact: Contact,
     pub folder_name: String,
     pub is_favorite: bool,
+    /// Which account the contact belongs to (opaque id, and that account's email address)
+    pub account_id: String,
+    pub account_email: String,
 }
 
 /// A configured mail/calendar account (see `accounts.rs` for the id scheme)
@@ -258,7 +262,14 @@ pub struct UiSettings {
     /// Whether the left nav sidebar is expanded (persisted across launches)
     #[serde(default = "default_true")]
     pub sidebar_expanded: bool,
+    /// How the reading pane picks HTML or system-font rendering:
+    /// "html" | "system" | "system_sender" (system, unless the sender is listed
+    /// with "always HTML"). See `settings::normalize_message_rendering`.
+    #[serde(default = "default_message_rendering")]
+    pub message_rendering: String,
 }
+
+fn default_message_rendering() -> String { "system_sender".to_string() }
 
 fn default_true() -> bool { true }
 
@@ -296,6 +307,7 @@ impl Default for Settings {
                 use_tui_style: true,
                 animation_enabled: true,
                 sidebar_expanded: true,
+                message_rendering: default_message_rendering(),
             },
             sync: SyncSettings {
                 poll_interval_secs: 120, // 2 minute polling interval for email daemon

@@ -8,6 +8,25 @@ use log::{debug, info};
 use rusqlite::{Connection, params, OptionalExtension};
 use chrono::Utc;
 
+/// How one sender's mail should be shown. Keyed by lower-cased address.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SenderPref {
+    pub email: String,
+    /// Always render this sender's mail as HTML.
+    pub always_html: bool,
+    /// Always load remote images in this sender's mail.
+    pub always_images: bool,
+}
+
+/// Result of `add_sender`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SenderAdd {
+    Added,
+    AlreadyListed,
+    /// Not shaped like an address (no single `@`, spaces, empty parts).
+    Invalid,
+}
+
 pub struct Database {
     conn: Connection,
     /// Account that rows written through this handle belong to.
@@ -85,11 +104,32 @@ impl Database {
         
         self.conn.execute(
             "CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-                INSERT INTO messages_fts(messages_fts, id, subject, from_email, from_name, body)
-                VALUES ('delete', old.id, old.subject, old.from_email, old.from_name, old.body);
+                DELETE FROM messages_fts WHERE id = old.id;
             END",
             [],
         )?;
+
+        // Databases created before this fix carry triggers that use the FTS5 'delete'
+        // command, which is only valid for external-content tables; on this ordinary
+        // table every UPDATE or DELETE on `messages` failed with "SQL logic error".
+        let stale_triggers: i32 = self.conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'trigger' AND name IN ('messages_au', 'messages_ad')
+               AND sql LIKE '%''delete''%'",
+            [],
+            |row| row.get(0),
+        )?;
+        if stale_triggers > 0 {
+            self.conn.execute("DROP TRIGGER IF EXISTS messages_au", [])?;
+            self.conn.execute("DROP TRIGGER IF EXISTS messages_ad", [])?;
+            self.create_messages_au_trigger()?;
+            self.conn.execute(
+                "CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+                    DELETE FROM messages_fts WHERE id = old.id;
+                END",
+                [],
+            )?;
+        }
 
         // Folders table
         self.conn.execute(
@@ -120,6 +160,47 @@ impl Database {
                 [],
             )?;
         }
+
+        // read_pending: a local read/unread change not yet pushed to the provider.
+        let has_pending_col: bool = self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='read_pending'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .unwrap_or(0) > 0;
+        if !has_pending_col {
+            self.conn.execute(
+                "ALTER TABLE messages ADD COLUMN read_pending INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
+        // Full bodies are fetched on demand when a message is opened and kept here;
+        // `body` stays the short preview the daemon syncs.
+        for (col, decl) in [("body_full", "TEXT"), ("body_type", "TEXT")] {
+            let has: bool = self.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = ?1",
+                    [col],
+                    |row| row.get::<_, i32>(0),
+                )
+                .unwrap_or(0) > 0;
+            if !has {
+                self.conn.execute(&format!("ALTER TABLE messages ADD COLUMN {} {}", col, decl), [])?;
+            }
+        }
+
+        // Per-sender display preferences (managed in Settings → Senders).
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS sender_prefs (
+                email TEXT PRIMARY KEY,
+                always_html INTEGER NOT NULL DEFAULT 0,
+                always_images INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )",
+            [],
+        )?;
 
         // Calendar events (separate from mail; created if not present)
         self.conn.execute(
@@ -195,9 +276,11 @@ impl Database {
     /// account backfill can suspend it inside its transaction).
     fn create_messages_au_trigger(&self) -> Result<()> {
         self.conn.execute(
-            "CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-                INSERT INTO messages_fts(messages_fts, id, subject, from_email, from_name, body)
-                VALUES('delete', old.id, old.subject, old.from_email, old.from_name, old.body);
+            // Only the indexed columns: read flags, folder and account changes must not
+            // touch the index (it has no usable key, so each re-index is a full scan).
+            "CREATE TRIGGER IF NOT EXISTS messages_au
+             AFTER UPDATE OF subject, from_email, from_name, body ON messages BEGIN
+                DELETE FROM messages_fts WHERE id = old.id;
                 INSERT INTO messages_fts(id, subject, from_email, from_name, body)
                 VALUES (new.id, new.subject, new.from_email, new.from_name, new.body);
             END",
@@ -531,6 +614,173 @@ impl Database {
         Ok(())
     }
     
+    /// Local read/unread change from the UI. Flags the row so the daemon pushes it to the
+    /// provider, and keeps the folder's unread count in step until the next folder sync.
+    /// Returns whether the state actually changed.
+    pub fn set_message_read(&self, id: &str, is_read: bool) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE messages SET is_read = ?1, read_pending = 1 WHERE id = ?2 AND is_read != ?1",
+            params![is_read, id],
+        )?;
+        if changed > 0 {
+            let delta: i32 = if is_read { -1 } else { 1 };
+            self.conn.execute(
+                "UPDATE folders SET unread_item_count = MAX(0, COALESCE(unread_item_count, 0) + ?1)
+                 WHERE id = (SELECT folder_id FROM messages WHERE id = ?2)",
+                params![delta, id],
+            )?;
+        }
+        Ok(changed > 0)
+    }
+
+    /// The cached full body of a message as (content type "html"|"text", content).
+    pub fn cached_body(&self, id: &str) -> Result<Option<(String, String)>> {
+        let row = self.conn.query_row(
+            "SELECT body_type, body_full FROM messages WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?)),
+        );
+        match row {
+            Ok((Some(t), Some(c))) => Ok(Some((t, c))),
+            Ok(_) => Ok(None),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn store_body(&self, id: &str, content_type: &str, content: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE messages SET body_type = ?1, body_full = ?2 WHERE id = ?3",
+            params![content_type, content, id],
+        )?;
+        Ok(())
+    }
+
+    /// Normalise an address for the sender table: trimmed, lower-cased. None if it is not
+    /// shaped like `local@domain` (one `@`, no whitespace, both sides non-empty, a dot in
+    /// the domain).
+    pub fn normalize_sender(email: &str) -> Option<String> {
+        let e = email.trim().to_lowercase();
+        let (local, domain) = e.split_once('@')?;
+        let ok = !local.is_empty()
+            && !domain.is_empty()
+            && !domain.contains('@')
+            && domain.contains('.')
+            && !domain.starts_with('.')
+            && !domain.ends_with('.')
+            && !e.chars().any(|c| c.is_whitespace());
+        ok.then_some(e)
+    }
+
+    /// Add a sender with both preferences off.
+    pub fn add_sender(&self, email: &str) -> Result<SenderAdd> {
+        let Some(email) = Self::normalize_sender(email) else { return Ok(SenderAdd::Invalid) };
+        let n = self.conn.execute("INSERT OR IGNORE INTO sender_prefs (email) VALUES (?1)", params![email])?;
+        Ok(if n > 0 { SenderAdd::Added } else { SenderAdd::AlreadyListed })
+    }
+
+    /// All listed senders, alphabetical.
+    pub fn list_senders(&self) -> Result<Vec<SenderPref>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT email, always_html, always_images FROM sender_prefs ORDER BY email ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok(SenderPref { email: r.get(0)?, always_html: r.get(1)?, always_images: r.get(2)? }))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Set one preference (`"html"` or `"images"`) for a listed sender. Returns whether a
+    /// listed sender was updated (false: unknown address or unknown field).
+    pub fn set_sender_pref(&self, email: &str, field: &str, value: bool) -> Result<bool> {
+        let column = match field {
+            "html" => "always_html",
+            "images" => "always_images",
+            _ => return Ok(false),
+        };
+        let Some(email) = Self::normalize_sender(email) else { return Ok(false) };
+        let n = self.conn.execute(
+            &format!("UPDATE sender_prefs SET {} = ?1 WHERE email = ?2", column),
+            params![value, email],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn remove_sender(&self, email: &str) -> Result<bool> {
+        let Some(email) = Self::normalize_sender(email) else { return Ok(false) };
+        Ok(self.conn.execute("DELETE FROM sender_prefs WHERE email = ?1", params![email])? > 0)
+    }
+
+    /// The short preview the daemon synced (what the list row is built from).
+    pub fn message_preview(&self, id: &str) -> Option<String> {
+        self.conn
+            .query_row("SELECT body FROM messages WHERE id = ?1", params![id], |r| r.get::<_, String>(0))
+            .ok()
+    }
+
+    /// The account a cached message belongs to.
+    pub fn message_account(&self, id: &str) -> Result<Option<String>> {
+        match self.conn.query_row(
+            "SELECT account_id FROM messages WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, Option<String>>(0),
+        ) {
+            Ok(a) => Ok(a),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Read-state changes made locally that the provider has not heard about yet.
+    pub fn pending_reads(&self) -> Result<Vec<(String, bool)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, is_read FROM messages WHERE read_pending = 1 AND account_id = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![self.account_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// The provider accepted `is_read` for this message. Stays pending if the user has
+    /// flipped it again in the meantime.
+    pub fn clear_read_pending(&self, id: &str, is_read: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE messages SET read_pending = 0 WHERE id = ?1 AND is_read = ?2",
+            params![id, is_read],
+        )?;
+        Ok(())
+    }
+
+    /// Make the cached read flags of one folder match the provider's list of unread ids.
+    /// Rows with an unpushed local change are left alone. Returns rows changed.
+    pub fn reconcile_read_state(&self, folder_id: &str, unread_ids: &[String]) -> Result<usize> {
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> Result<usize> {
+            self.conn.execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS unread_ids (id TEXT PRIMARY KEY); DELETE FROM unread_ids;",
+            )?;
+            {
+                let mut ins = self.conn.prepare("INSERT OR IGNORE INTO unread_ids (id) VALUES (?1)")?;
+                for id in unread_ids {
+                    ins.execute(params![id])?;
+                }
+            }
+            let n = self.conn.execute(
+                "UPDATE messages
+                 SET is_read = (id NOT IN (SELECT id FROM unread_ids))
+                 WHERE folder_id = ?1 AND read_pending = 0
+                   AND is_read != (id NOT IN (SELECT id FROM unread_ids))",
+                params![folder_id],
+            )?;
+            Ok(n)
+        })();
+        match result {
+            Ok(n) => { self.conn.execute_batch("COMMIT")?; Ok(n) }
+            Err(e) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(e) }
+        }
+    }
+
     /// Delete old messages (retention policy)
     pub fn cleanup_old_messages(&self, days: i32) -> Result<usize> {
         let count = self.conn.execute(
@@ -566,7 +816,7 @@ impl Database {
                 email.from,
                 email.body,
                 email.received,
-                false, // new emails default to unread
+                email.is_read,
                 now,
                 email.folder_id,
                 self.account_id,
@@ -620,16 +870,18 @@ impl Database {
         Ok(())
     }
 
-    /// Get all folders sorted: well-known first (by sort_order), then alphabetical
+    /// This handle's account's folders, sorted: well-known first (by sort_order), then alphabetical.
+    /// Scoped to the account: each account's daemon must only ever sync its own folders.
     pub fn get_folders(&self) -> Result<Vec<MailFolder>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, display_name, parent_folder_id, unread_item_count, total_item_count, well_known_name
              FROM folders
+             WHERE account_id = ?1
              ORDER BY sort_order ASC, display_name ASC",
         )?;
 
         let folders = stmt
-            .query_map([], |row| {
+            .query_map(params![self.account_id], |row| {
                 Ok(MailFolder {
                     id:                row.get(0)?,
                     display_name:      row.get(1)?,
@@ -731,6 +983,11 @@ impl Database {
     /// folders alphabetical). `sort`: first | last | company | recent. Entries missing the
     /// sort key always go last.
     pub fn query_contacts(&self, view: &str, sort: &str) -> Result<Vec<ContactRow>> {
+        self.query_contacts_for(view, sort, None)
+    }
+
+    /// As `query_contacts`, optionally limited to one account (its id or its email address).
+    pub fn query_contacts_for(&self, view: &str, sort: &str, account: Option<&str>) -> Result<Vec<ContactRow>> {
         // `x = ''` sorts empty values after real ones.
         let key = match sort {
             "last"    => "(c.surname = ''), lower(c.surname), lower(c.given_name), lower(c.display_name)",
@@ -738,21 +995,24 @@ impl Database {
             "recent"  => "c.created_at DESC, lower(c.display_name)",
             _         => "(c.given_name = ''), lower(c.given_name), lower(c.surname), lower(c.display_name)",
         };
+        let account_cond = "(?1 IS NULL OR c.account_id = ?1 OR lower(a.email) = lower(?1))";
         let (filter, order) = match view {
-            "favorites" => ("WHERE c.is_favorite = 1", key.to_string()),
-            "lists"     => ("", format!("lower(COALESCE(f.display_name, 'Contacts')), {}", key)),
-            _           => ("", key.to_string()),
+            "favorites" => (format!("WHERE c.is_favorite = 1 AND {}", account_cond), key.to_string()),
+            "lists"     => (format!("WHERE {}", account_cond), format!("lower(COALESCE(f.display_name, 'Contacts')), {}", key)),
+            _           => (format!("WHERE {}", account_cond), key.to_string()),
         };
         let sql = format!(
             "SELECT c.id, c.display_name, c.given_name, c.surname, c.company, c.job_title, c.emails, c.phones,
-                    c.addresses, c.folder_id, c.created_at, c.modified_at, COALESCE(f.display_name, 'Contacts'), c.is_favorite
+                    c.addresses, c.folder_id, c.created_at, c.modified_at, COALESCE(f.display_name, 'Contacts'), c.is_favorite,
+                    COALESCE(c.account_id, ''), COALESCE(a.email, '')
              FROM contacts c LEFT JOIN contact_folders f ON f.id = c.folder_id
+                             LEFT JOIN accounts a ON a.id = c.account_id
              {} ORDER BY {}",
             filter, order
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
-            .query_map([], |r| {
+            .query_map(params![account], |r| {
                 let emails: String = r.get(6)?;
                 let phones: String = r.get(7)?;
                 let addresses: String = r.get(8)?;
@@ -767,6 +1027,8 @@ impl Database {
                     },
                     folder_name: r.get(12)?,
                     is_favorite: r.get(13)?,
+                    account_id: r.get(14)?,
+                    account_email: r.get(15)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -837,6 +1099,12 @@ impl Database {
 
     /// Events overlapping the given month ("YYYY-MM"), ordered by start
     pub fn get_events_for_month(&self, month: &str) -> Result<Vec<CalendarEvent>> {
+        Ok(self.get_events_for_month_by_account(month, None)?.into_iter().map(|(e, _, _)| e).collect())
+    }
+
+    /// Month events of every account (or just `account`: its id or email address), each with
+    /// the id and email address of the account it belongs to.
+    pub fn get_events_for_month_by_account(&self, month: &str, account: Option<&str>) -> Result<Vec<(CalendarEvent, String, String)>> {
         let (y, m) = month.split_once('-').unwrap_or(("1970", "01"));
         let (y, m): (i32, u32) = (y.parse().unwrap_or(1970), m.parse().unwrap_or(1));
         let (ny, nm) = if m >= 12 { (y + 1, 1) } else { (y, m + 1) };
@@ -844,14 +1112,16 @@ impl Database {
         let to = format!("{:04}-{:02}-01T00:00:00", ny, nm);
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, subject, body, start_at, end_at, is_all_day, COALESCE(time_zone, ''), event_type, series_master_id
-             FROM calendar_events
-             WHERE start_at < ?2 AND end_at >= ?1 AND event_type != 'seriesMaster'
-             ORDER BY start_at ASC",
+            "SELECT e.id, e.subject, e.body, e.start_at, e.end_at, e.is_all_day, COALESCE(e.time_zone, ''), e.event_type,
+                    e.series_master_id, COALESCE(e.account_id, ''), COALESCE(a.email, '')
+             FROM calendar_events e LEFT JOIN accounts a ON a.id = e.account_id
+             WHERE e.start_at < ?2 AND e.end_at >= ?1 AND e.event_type != 'seriesMaster'
+               AND (?3 IS NULL OR e.account_id = ?3 OR lower(a.email) = lower(?3))
+             ORDER BY e.start_at ASC",
         )?;
         let events = stmt
-            .query_map(params![from, to], |row| {
-                Ok(CalendarEvent {
+            .query_map(params![from, to, account], |row| {
+                Ok((CalendarEvent {
                     id:         row.get(0)?,
                     subject:    row.get(1)?,
                     body:       row.get(2)?,
@@ -861,11 +1131,28 @@ impl Database {
                     time_zone:  row.get(6)?,
                     event_type: row.get(7)?,
                     series_master_id: row.get(8)?,
-                })
+                }, row.get(9)?, row.get(10)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(events)
     }
+}
+
+/// Subset of `ids` already stored in `messages` (read-only side connection, so a provider can
+/// skip fetching messages it already has without holding the daemon's `Database` across awaits).
+pub fn known_message_ids(path: &std::path::Path, ids: &[String]) -> std::collections::HashSet<String> {
+    let mut known = std::collections::HashSet::new();
+    let Ok(conn) = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else { return known };
+    for chunk in ids.chunks(500) {
+        let marks = vec!["?"; chunk.len()].join(",");
+        let Ok(mut stmt) = conn.prepare(&format!("SELECT id FROM messages WHERE id IN ({})", marks)) else { continue };
+        let found: Vec<String> = match stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| r.get::<_, String>(0)) {
+            Ok(rows) => rows.flatten().collect(),
+            Err(_) => Vec::new(),
+        };
+        known.extend(found);
+    }
+    known
 }
 
 #[cfg(test)]
@@ -1024,6 +1311,67 @@ mod account_tests {
     }
 
     #[test]
+    fn read_state_toggle_push_and_reconcile() {
+        let db = Database::open_for_account(":memory:", "a1").unwrap();
+        let mk = |id: &str, read: bool| EmailMessage {
+            id: id.into(), from: "x@y".into(), subject: "s".into(), received: "2026-10-01T00:00:00Z".into(),
+            body: "b".into(), folder_id: Some("f".into()), is_read: read,
+        };
+        db.insert_email(&mk("m1", false)).unwrap();
+        db.insert_email(&mk("m2", true)).unwrap();
+        db.insert_email(&mk("m3", false)).unwrap();
+        db.conn.execute("INSERT INTO folders (id, display_name, unread_item_count, total_item_count) VALUES ('f','F',2,3)", []).unwrap();
+        let unread = |id: &str| -> bool { !db.conn.query_row("SELECT is_read FROM messages WHERE id=?1", [id], |r| r.get::<_, bool>(0)).unwrap() };
+        let folder_unread = || -> i32 { db.conn.query_row("SELECT unread_item_count FROM folders WHERE id='f'", [], |r| r.get(0)).unwrap() };
+
+        // insert keeps the provider's flag
+        assert!(unread("m1") && !unread("m2"));
+
+        // toggle: changes state, adjusts the folder count, queues a push; repeat is a no-op
+        assert!(db.set_message_read("m1", true).unwrap());
+        assert!(!db.set_message_read("m1", true).unwrap());
+        assert_eq!(folder_unread(), 1);
+        assert_eq!(db.pending_reads().unwrap(), vec![("m1".to_string(), true)]);
+
+        // reconcile leaves the pending row alone, fixes the others (m2 is unread upstream, m3 read)
+        let n = db.reconcile_read_state("f", &["m1".to_string(), "m2".to_string()]).unwrap();
+        assert_eq!(n, 2);
+        assert!(!unread("m1") && unread("m2") && !unread("m3"));
+
+        // a flip after the push started keeps the row pending; a matching clear releases it
+        db.clear_read_pending("m1", false).unwrap();
+        assert_eq!(db.pending_reads().unwrap().len(), 1);
+        db.clear_read_pending("m1", true).unwrap();
+        assert!(db.pending_reads().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sender_prefs_add_list_set_remove() {
+        let db = Database::open_for_account(":memory:", "a1").unwrap();
+        assert_eq!(db.add_sender("  Bob@Example.COM ").unwrap(), SenderAdd::Added);
+        assert_eq!(db.add_sender("bob@example.com").unwrap(), SenderAdd::AlreadyListed);
+        for bad in ["", "bob", "bob@", "@x.com", "a b@x.com", "a@b@c.com", "a@nodot", "a@.com", "a@x."] {
+            assert_eq!(db.add_sender(bad).unwrap(), SenderAdd::Invalid, "{bad}");
+        }
+        db.add_sender("amy@x.org").unwrap();
+        let l = db.list_senders().unwrap();
+        assert_eq!(l.iter().map(|s| s.email.as_str()).collect::<Vec<_>>(), vec!["amy@x.org", "bob@example.com"]);
+        assert!(l.iter().all(|s| !s.always_html && !s.always_images));
+
+        assert!(db.set_sender_pref("BOB@example.com", "html", true).unwrap());
+        assert!(db.set_sender_pref("bob@example.com", "images", true).unwrap());
+        assert!(db.set_sender_pref("bob@example.com", "html", false).unwrap());
+        assert!(!db.set_sender_pref("bob@example.com", "bogus", true).unwrap());
+        assert!(!db.set_sender_pref("nobody@x.com", "html", true).unwrap());
+        let bob = db.list_senders().unwrap().into_iter().find(|s| s.email == "bob@example.com").unwrap();
+        assert_eq!((bob.always_html, bob.always_images), (false, true));
+
+        assert!(db.remove_sender("Amy@x.org").unwrap());
+        assert!(!db.remove_sender("amy@x.org").unwrap());
+        assert_eq!(db.list_senders().unwrap().len(), 1);
+    }
+
+    #[test]
     fn insert_account_uses_given_id_and_rejects_duplicates() {
         let db = Database::open(":memory:").unwrap();
         db.insert_account("exchange-abc123", "exchange", Some("a@x.com"), None, "{}").unwrap();
@@ -1036,7 +1384,7 @@ mod account_tests {
         let db = Database::open_for_account(":memory:", "gmail-123abc").unwrap();
         db.insert_email(&EmailMessage {
             id: "m1".into(), from: "x@y".into(), subject: "s".into(), received: "2026-10-01T00:00:00Z".into(),
-            body: "b".into(), folder_id: Some("f".into()),
+            body: "b".into(), folder_id: Some("f".into()), is_read: false,
         }).unwrap();
         db.upsert_event(&CalendarEvent {
             id: "e1".into(), subject: "s".into(), body: "".into(), start: "2026-10-01T09:00:00".into(),
@@ -1213,5 +1561,80 @@ mod contact_tests {
         assert_eq!(acct, "exchange-aaaaaa");
         db.delete_account("exchange-aaaaaa").unwrap();
         assert!(db.query_contacts("all", "first").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod multi_account_data_tests {
+    use super::*;
+    use crate::models::{CalendarEvent, Contact, ContactFolder, EmailMessage, MailFolder};
+
+    /// One shared database file, two accounts (Exchange + Gmail), each with its own handle.
+    fn two_accounts(name: &str) -> (String, Database, Database) {
+        let path = std::env::temp_dir().join(format!("omarchylook-multi-{}-{}.db", name, std::process::id())).to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&path);
+        let ex = Database::open_for_account(&path, "exchange-aaaaaa").unwrap();
+        let gm = Database::open_for_account(&path, "gmail-bbbbbb").unwrap();
+        ex.insert_account("exchange-aaaaaa", "exchange", Some("adam@work.com"), None, "{}").unwrap();
+        gm.insert_account("gmail-bbbbbb", "gmail", Some("Adam@Gmail.com"), None, "{}").unwrap();
+        (path, ex, gm)
+    }
+
+    fn folder(id: &str) -> MailFolder {
+        MailFolder { id: id.into(), display_name: "Inbox".into(), parent_folder_id: None, unread_item_count: Some(1), total_item_count: Some(2), well_known_name: Some("inbox".into()) }
+    }
+
+    #[test]
+    fn each_account_only_sees_and_syncs_its_own_folders() {
+        let (path, ex, gm) = two_accounts("folders");
+        ex.upsert_folder(&folder("AAMk-inbox")).unwrap();
+        gm.upsert_folder(&folder("gmail-bbbbbb:INBOX")).unwrap();
+        assert_eq!(ex.get_folders().unwrap().iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["AAMk-inbox"]);
+        assert_eq!(gm.get_folders().unwrap().iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["gmail-bbbbbb:INBOX"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn contacts_and_events_carry_and_filter_by_account_email() {
+        let (path, ex, gm) = two_accounts("rows");
+        let contact = |id: &str, name: &str| Contact { id: id.into(), display_name: name.into(), ..Default::default() };
+        ex.upsert_contact_folder(&ContactFolder { id: "contacts".into(), display_name: "Contacts".into(), parent_folder_id: None }).unwrap();
+        ex.upsert_contact(&contact("c-ex", "Exchange Eve")).unwrap();
+        gm.upsert_contact(&contact("gmail-bbbbbb:people/c1", "Gmail Gus")).unwrap();
+        let ev = |id: &str| CalendarEvent { id: id.into(), subject: "s".into(), start: "2026-10-05T09:00:00".into(), end: "2026-10-05T10:00:00".into(), ..Default::default() };
+        ex.upsert_event(&ev("e-ex")).unwrap();
+        gm.upsert_event(&ev("gmail-bbbbbb:e1")).unwrap();
+
+        let all = ex.query_contacts_for("all", "first", None).unwrap();
+        assert_eq!(all.len(), 2);
+        let by_email = |email: &str| ex.query_contacts_for("all", "first", Some(email)).unwrap();
+        let g = by_email("adam@gmail.com"); // case-insensitive address match
+        assert_eq!((g.len(), g[0].contact.display_name.as_str(), g[0].account_email.as_str(), g[0].account_id.as_str()), (1, "Gmail Gus", "Adam@Gmail.com", "gmail-bbbbbb"));
+        assert_eq!(by_email("adam@work.com")[0].contact.display_name, "Exchange Eve");
+        assert_eq!(ex.query_contacts_for("all", "first", Some("gmail-bbbbbb")).unwrap().len(), 1, "id works as filter too");
+        assert!(by_email("nobody@x.com").is_empty());
+        assert_eq!(ex.query_contacts_for("lists", "first", Some("adam@gmail.com")).unwrap().len(), 1);
+
+        let events = ex.get_events_for_month_by_account("2026-10", None).unwrap();
+        assert_eq!(events.len(), 2);
+        let g: Vec<_> = events.iter().filter(|(_, id, _)| id == "gmail-bbbbbb").collect();
+        assert_eq!((g.len(), g[0].0.id.as_str(), g[0].2.as_str()), (1, "gmail-bbbbbb:e1", "Adam@Gmail.com"));
+        assert_eq!(ex.get_events_for_month_by_account("2026-10", Some("adam@work.com")).unwrap().len(), 1);
+        assert_eq!(ex.get_events_for_month("2026-10").unwrap().len(), 2, "plain month query still spans accounts");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn known_message_ids_reports_only_stored_ones() {
+        let (path, _ex, gm) = two_accounts("known");
+        let msg = |id: &str| EmailMessage { id: id.into(), from: "a@b.c".into(), subject: "s".into(), received: "2026-10-01T00:00:00Z".into(), body: "".into(), folder_id: None, is_read: true };
+        gm.insert_email(&msg("gmail-bbbbbb:1")).unwrap();
+        gm.insert_email(&msg("gmail-bbbbbb:2")).unwrap();
+        let ids: Vec<String> = ["gmail-bbbbbb:1", "gmail-bbbbbb:3", "gmail-bbbbbb:2"].iter().map(|s| s.to_string()).collect();
+        let known = known_message_ids(std::path::Path::new(&path), &ids);
+        assert_eq!(known.len(), 2);
+        assert!(known.contains("gmail-bbbbbb:1") && !known.contains("gmail-bbbbbb:3"));
+        assert!(known_message_ids(std::path::Path::new("/nonexistent/x.db"), &ids).is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 }

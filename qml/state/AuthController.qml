@@ -2,7 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-// Microsoft device-code login state. The Rust backend writes auth_state.json
+// Login state: Microsoft device-code flow and Gmail browser flow. The Rust backend writes auth_state.json
 // and device_code.json into the config dir; we watch those files (no polling)
 // and POST login/logout intents to the backend.
 Item {
@@ -17,6 +17,12 @@ Item {
   property string verificationUri: ""
   property int secondsRemaining: 0
   property string errorMessage: ""
+
+  // Gmail sign-in: the user types an address (needsEmail), the backend opens the browser
+  // and publishes the Google URL (googleUrl, shown as a fallback) until sign-in completes.
+  property string loginProvider: ""
+  property bool needsEmail: false
+  property string googleUrl: ""
 
   // Bumped by the backend after each completed login/sign-out (also while another
   // account is already signed in, when isAuthenticated doesn't change).
@@ -43,9 +49,18 @@ Item {
   function startLogin(provider) {
     userCode = ""
     verificationUri = ""
+    googleUrl = ""
     secondsRemaining = 0
     errorMessage = ""
+    loginProvider = provider || "exchange"
     showModal = true
+
+    // Gmail: ask for the address first; submitEmail() starts the browser sign-in.
+    if (loginProvider === "gmail") {
+      needsEmail = true
+      return
+    }
+    needsEmail = false
 
     var xhr = new XMLHttpRequest()
     xhr.onreadystatechange = function() {
@@ -54,6 +69,26 @@ Item {
       else root.errorMessage = "Failed to start authentication (backend not ready?)"
     }
     xhr.open("POST", root.backendUrl + "/auth/login?provider=" + encodeURIComponent(provider || "exchange"))
+    xhr.send()
+  }
+
+  // Gmail step 2: the address was entered. The backend opens Google's sign-in page in the
+  // browser (address pre-filled) and waits for it; auth_state.json reports the outcome.
+  function submitEmail(email) {
+    var addr = (email || "").trim()
+    if (addr.indexOf("@") < 1) { errorMessage = "Enter your Gmail address"; return }
+    errorMessage = ""
+    needsEmail = false
+    googleUrl = ""
+    secondsRemaining = 300
+    countdown.restart()
+    var xhr = new XMLHttpRequest()
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState !== XMLHttpRequest.DONE) return
+      if (xhr.status === 200) googleFile.reload()
+      else root.errorMessage = "Failed to start authentication (backend not ready?)"
+    }
+    xhr.open("POST", root.backendUrl + "/auth/login?provider=gmail&email=" + encodeURIComponent(addr))
     xhr.send()
   }
 
@@ -93,7 +128,15 @@ Item {
   }
 
   function cancel() {
+    if (loginProvider === "gmail" && !needsEmail) {
+      // Frees the backend's one-shot loopback listener.
+      var xhr = new XMLHttpRequest()
+      xhr.open("POST", root.backendUrl + "/auth/cancel")
+      xhr.send()
+    }
     showModal = false
+    needsEmail = false
+    googleUrl = ""
     countdown.stop()
   }
 
@@ -102,7 +145,7 @@ Item {
       var data = JSON.parse(raw)
       var was = root.isAuthenticated
       root.isAuthenticated = data.is_authenticated === true
-      if (data.error) root.errorMessage = data.error
+      if (data.error) { root.errorMessage = data.error; countdown.stop() }
       if (data.confirm_reauth) {
         root.reauthPrompt = data.confirm_reauth
         root.showModal = false
@@ -115,7 +158,7 @@ Item {
       if (serial !== root.loginSerial) {
         root.loginSerial = serial
         if (serial > 0) {
-          if (root.isAuthenticated && !data.error) { root.showModal = false; countdown.stop(); root.userCode = "" }
+          if (root.isAuthenticated && !data.error) { root.showModal = false; countdown.stop(); root.userCode = ""; root.googleUrl = "" }
           root.accountsChanged()
         }
       }
@@ -123,6 +166,7 @@ Item {
         root.showModal = false
         countdown.stop()
         root.userCode = ""
+        root.googleUrl = ""
         root.errorMessage = ""
       }
     } catch (e) { /* partial write; the next change event re-reads */ }
@@ -151,6 +195,27 @@ Item {
     onLoadFailed: root.isAuthenticated = false
   }
 
+  function applyGoogleLogin(raw) {
+    if (!root.showModal || root.loginProvider !== "gmail" || root.needsEmail) return
+    try {
+      var data = JSON.parse(raw)
+      // Ignore a leftover file from an earlier attempt.
+      if (!data.auth_url || (data.started || 0) < Date.now() / 1000 - 30) return
+      root.googleUrl = data.auth_url
+      root.secondsRemaining = data.expires_in || 300
+      countdown.restart()
+    } catch (e) { /* not ready yet */ }
+  }
+
+  FileView {
+    id: googleFile
+    path: root.configDir + "/google_login.json"
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.applyGoogleLogin(text())
+    onFileChanged: reload()
+  }
+
   FileView {
     id: codeFile
     path: root.configDir + "/device_code.json"
@@ -168,7 +233,7 @@ Item {
       if (root.secondsRemaining > 0) {
         root.secondsRemaining -= 1
       } else {
-        root.errorMessage = "Device code expired. Please try again."
+        root.errorMessage = root.loginProvider === "gmail" ? "Sign-in timed out. Please try again." : "Device code expired. Please try again."
         stop()
       }
     }

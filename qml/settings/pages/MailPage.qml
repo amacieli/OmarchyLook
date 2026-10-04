@@ -4,15 +4,18 @@ import qs.Ui
 import "../../common"
 import ".."
 
-// Placeholder: none of these values are persisted yet.
+// Only "Message rendering" is wired to the backend (settings.toml); the other values
+// are placeholders and are not persisted.
 SettingsPage {
   id: page
+
+  property var app: null
 
   property string syncInterval: "5"
   property int markReadDelay: 2
   property bool conversationView: true
 
-  editing: signature.activeFocus || syncDropdown.popupOpen || delay.field.activeFocus
+  editing: signature.activeFocus || syncDropdown.popupOpen || delay.field.activeFocus || renderingDropdown.popupOpen
 
   title: "Mail"
   description: "Sync behaviour and reading preferences."
@@ -35,6 +38,36 @@ SettingsPage {
         { value: "0",  label: "Manually" }
       ]
       onChanged: function(v) { page.syncInterval = v }
+    }
+  }
+
+  PanelSeparator { width: parent.width }
+
+  Column {
+    width: parent.width
+    spacing: Style.space(6)
+
+    PanelSectionHeader { text: "MESSAGE RENDERING" }
+    Dropdown {
+      id: renderingDropdown
+      width: parent.width
+      label: "Show messages as"
+      value: page.app ? page.app.messageRendering : "system_sender"
+      options: [
+        { value: "html",          label: "Always HTML" },
+        { value: "system",        label: "Always System" },
+        { value: "system_sender", label: "Always System with per-sender override" }
+      ]
+      onChanged: function(v) { if (page.app) page.app.setMessageRendering(v) }
+    }
+    UiText {
+      width: parent.width
+      text: page.app && page.app.messageRendering === "system_sender"
+        ? "System font, except for senders marked \"Always HTML\" under Senders."
+        : "The HTML / System button on a message still overrides this for that message."
+      dim: true
+      wrapMode: Text.WordWrap
+      font.pixelSize: Style.font.caption
     }
   }
 

@@ -1,6 +1,6 @@
 //! Email provider trait for pluggable auth backends
 //!
-//! Implementations: Graph API, IMAP (future)
+//! Implementations: Graph API, Gmail API (IMAP future)
 
 use crate::errors::Result;
 use crate::models::{EmailMessage, MailFolder};
@@ -31,6 +31,17 @@ pub trait EmailProvider: Send + Sync {
         Ok(count)
     }
 
+    /// Ids of every unread message in a folder. Err if the list could not be read in full
+    /// (callers must not treat a partial list as authoritative).
+    async fn fetch_unread_ids(&self, _folder_id: &str) -> Result<Vec<String>> {
+        Err(crate::errors::OmarchyError::HttpError("fetch_unread_ids not supported".into()))
+    }
+
+    /// Set a message's read flag on the provider.
+    async fn set_message_read(&self, _id: &str, _is_read: bool) -> Result<()> {
+        Err(crate::errors::OmarchyError::HttpError("set_message_read not supported".into()))
+    }
+
     /// Fetch all top-level mail folders
     async fn fetch_folders(&self) -> Result<Vec<MailFolder>>;
 
@@ -46,3 +57,11 @@ pub use calendar::{CalendarProvider, GraphCalendarProvider};
 
 pub mod contacts;
 pub use contacts::{ContactsProvider, GraphContactsProvider};
+
+pub mod google_api;
+pub mod gmail;
+pub use gmail::GmailProvider;
+pub mod google_calendar;
+pub use google_calendar::GoogleCalendarProvider;
+pub mod google_contacts;
+pub use google_contacts::GoogleContactsProvider;

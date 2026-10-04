@@ -2,13 +2,14 @@
 //! 
 //! Modules:
 //! - auth: Device Flow OAuth2 (Microsoft public client)
-//! - graph: Microsoft Graph API wrapper
+//! - google_auth: Gmail sign-in (browser + loopback redirect + PKCE)
+//! - providers: Microsoft Graph mail/calendar/contacts providers
 //! - db: SQLite cache with FTS5 for mail
 //! - settings: TOML configuration with file watching
 //! - keyring: SecretService integration for token storage
 
 pub mod auth;
-pub mod graph;
+pub mod google_auth;
 pub mod db;
 pub mod settings;
 pub mod keyring_mgr;
@@ -25,7 +26,6 @@ pub mod contacts_daemon;
 pub mod providers;
 
 pub use auth::AuthManager;
-pub use graph::GraphClient;
 pub use db::Database;
 pub use settings::SettingsManager;
 

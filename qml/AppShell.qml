@@ -35,13 +35,30 @@ FocusScope {
     // Hand keys to text inputs / popups while they own focus.
     blocked: topBar.searchFocused || settingsEditing || appState.auth.showModal
 
-    readonly property bool settingsEditing: appState.currentView === "settings"
-      && contentLoader.item && contentLoader.item.editing === true
+    // A page (settings fields, the mail view's image dropdown) owns the keyboard.
+    readonly property bool settingsEditing: contentLoader.item && contentLoader.item.editing === true
 
     onMoveRequested: function(dx, dy) { appState.moveCursor(dx, dy) }
     onActivateRequested: appState.activate()
     onCloseRequested: appState.back()
     onTextKey: function(t) { if (t === "s") appState.cycleFocus() }
+
+    // PageUp/PageDown move the cursor a screenful in the pane that has it. Qt's
+    // `Keys` has no page-key signal, so these are Shortcuts, switched off while a
+    // text field or the auth modal owns the keyboard (`blocked`).
+    function page(dir) {
+      var v = appState.currentView
+      if (v === "contacts") {
+        if (contentLoader.item && contentLoader.item.pageScroll) contentLoader.item.pageScroll(dir)
+      } else if (appState.focusPane === "folder") {
+        appState.moveVertical(dir * folderBar.pageRows)
+      } else if (appState.focusPane === "msg" && v === "mail") {
+        appState.moveVertical(dir * (contentLoader.item ? contentLoader.item.pageRows : 1))
+      }
+    }
+
+    Shortcut { sequences: ["PgUp"];   enabled: !keyCatcher.blocked; onActivated: keyCatcher.page(-1) }
+    Shortcut { sequences: ["PgDown"]; enabled: !keyCatcher.blocked; onActivated: keyCatcher.page(1) }
 
     // Esc must still dismiss the auth modal even though `blocked` is set.
     Keys.priority: Keys.BeforeItem
@@ -86,6 +103,7 @@ FocusScope {
         VSeparator { Layout.preferredWidth: 1; Layout.fillHeight: true }
 
         FolderBar {
+          id: folderBar
           visible: appState.currentView === "mail"
           Layout.preferredWidth: visible ? implicitWidth : 0
           Layout.fillHeight: true
@@ -122,7 +140,7 @@ FocusScope {
         backendOnline: appState.backendOnline
         viewLabel: appState.currentViewLabel
         folderName: appState.selectedFolderName
-        messageCount: appState.messageModel.count
+        messageCount: appState.messageTotal
         unreadCount: appState.unreadCount
         focusPane: appState.focusPane
         currentView: appState.currentView

@@ -268,6 +268,92 @@ fn watch_for_device_flow_trigger(config_dir: &PathBuf) {
     }
 }
 
+/// JSON for GET /messages/body: `{"type":"html"|"text","content":"..."}`, or
+/// `{"error":"..."}` when the body cannot be had.
+fn message_body_json(config_dir: &PathBuf, id: &str) -> String {
+    let err = |m: &str| format!("{{\"error\":{}}}", serde_json::to_string(m).unwrap());
+    if id.is_empty() {
+        return err("missing id");
+    }
+    let path = config_dir.join("messages.db");
+    let db = match Database::open(path.to_str().unwrap_or("messages.db")) {
+        Ok(db) => db,
+        Err(e) => return err(&format!("database: {}", e)),
+    };
+    let ok = |t: &str, c: &str| format!("{{\"type\":\"{}\",\"content\":{}}}", t, serde_json::to_string(c).unwrap());
+    if let Ok(Some((t, c))) = db.cached_body(id) {
+        return ok(&t, &c);
+    }
+    let account = match db.message_account(id) {
+        Ok(Some(a)) => a,
+        _ => return err("unknown message"),
+    };
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => return err(&format!("runtime: {}", e)),
+    };
+    let fetched = if omarchylook::accounts::provider_of(&account) == "gmail" {
+        rt.block_on(omarchylook::providers::GmailProvider::new(&account, None).fetch_message_body(id))
+    } else {
+        rt.block_on(GraphEmailProvider::new(AuthManager::for_account(&account)).fetch_message_body(id))
+    };
+    match fetched {
+        Ok((t, c)) => {
+            if let Err(e) = db.store_body(id, &t, &c) {
+                warn!("Could not cache body of {}: {}", id, e);
+            }
+            ok(&t, &c)
+        }
+        Err(e) => {
+            warn!("Body fetch failed for {}: {}", id, e);
+            // The cached preview still lets the pane show something.
+            let reason = if e.to_string().contains("404") {
+                "this message no longer exists on the server"
+            } else {
+                "could not fetch the message body"
+            };
+            format!(
+                "{{\"error\":{},\"preview\":{}}}",
+                serde_json::to_string(reason).unwrap(),
+                serde_json::to_string(&db.message_preview(id).unwrap_or_default()).unwrap()
+            )
+        }
+    }
+}
+
+/// JSON body for the /settings/senders endpoints (see the route comment).
+fn sender_prefs_response(config_dir: &PathBuf, first_line: &str) -> String {
+    use omarchylook::db::SenderAdd;
+    let err = |m: &str| format!("{{\"ok\":false,\"error\":{}}}", serde_json::to_string(m).unwrap());
+    let path = config_dir.join("messages.db");
+    let db = match Database::open(path.to_str().unwrap_or("messages.db")) {
+        Ok(db) => db,
+        Err(e) => return err(&format!("database: {}", e)),
+    };
+    let email = query_param(first_line, "email").unwrap_or_default();
+    let result = if first_line.contains("POST /settings/senders/add") {
+        db.add_sender(&email).map(|r| {
+            let status = match r { SenderAdd::Added => "added", SenderAdd::AlreadyListed => "exists", SenderAdd::Invalid => "invalid" };
+            format!("{{\"ok\":{},\"status\":\"{}\"}}", r != SenderAdd::Invalid, status)
+        })
+    } else if first_line.contains("POST /settings/senders/set") {
+        let field = query_param(first_line, "field").unwrap_or_default();
+        let value = query_param(first_line, "value").as_deref() == Some("true");
+        db.set_sender_pref(&email, &field, value).map(|ok| format!("{{\"ok\":{}}}", ok))
+    } else if first_line.contains("POST /settings/senders/remove") {
+        db.remove_sender(&email).map(|ok| format!("{{\"ok\":{}}}", ok))
+    } else {
+        db.list_senders().map(|rows| {
+            let items: Vec<String> = rows.iter().map(|s| format!(
+                "{{\"email\":{},\"always_html\":{},\"always_images\":{}}}",
+                serde_json::to_string(&s.email).unwrap(), s.always_html, s.always_images
+            )).collect();
+            format!("[{}]", items.join(","))
+        })
+    };
+    result.unwrap_or_else(|e| err(&e.to_string()))
+}
+
 /// Minimal HTTP trigger server — listens on localhost:27182
 /// QML uses XMLHttpRequest to POST to this endpoint to trigger auth/logout.
 /// This avoids the limitation of QML not being able to write files directly.
@@ -303,21 +389,33 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     let db_path = config_dir.join("messages.db");
                     let body = match rusqlite::Connection::open(&db_path) {
                         Ok(conn) => {
+                            // ?account=<id or email> limits to one account; every row says which
+                            // account (id + email address) it belongs to.
+                            let account = query_param(first_line, "account");
                             let mut stmt = conn.prepare(
-                                "SELECT id, display_name, unread_item_count, well_known_name \
-                                 FROM folders ORDER BY sort_order ASC, display_name ASC"
+                                "SELECT f.id, f.display_name, f.unread_item_count, f.well_known_name, f.total_item_count, \
+                                        COALESCE(f.account_id, ''), COALESCE(a.email, '') \
+                                 FROM folders f LEFT JOIN accounts a ON a.id = f.account_id \
+                                 WHERE (?1 IS NULL OR f.account_id = ?1 OR lower(a.email) = lower(?1)) \
+                                 ORDER BY f.account_id ASC, f.sort_order ASC, f.display_name ASC"
                             ).unwrap();
-                            let rows: Vec<String> = stmt.query_map([], |row| {
+                            let rows: Vec<String> = stmt.query_map(rusqlite::params![account], |row| {
                                 let id: String = row.get(0)?;
                                 let display_name: String = row.get(1)?;
                                 let unread: i32 = row.get::<_, Option<i32>>(2)?.unwrap_or(0);
                                 let well_known: String = row.get::<_, Option<String>>(3)?.unwrap_or_default();
+                                let total: i32 = row.get::<_, Option<i32>>(4)?.unwrap_or(0);
+                                let account_id: String = row.get(5)?;
+                                let account_email: String = row.get(6)?;
                                 Ok(format!(
-                                    "{{\"id\":{},\"display_name\":{},\"unread_item_count\":{},\"well_known_name\":{}}}",
+                                    "{{\"id\":{},\"display_name\":{},\"unread_item_count\":{},\"well_known_name\":{},\"total_item_count\":{},\"account_id\":{},\"account_email\":{}}}",
                                     serde_json::to_string(&id).unwrap(),
                                     serde_json::to_string(&display_name).unwrap(),
                                     unread,
                                     serde_json::to_string(&well_known).unwrap(),
+                                    total,
+                                    serde_json::to_string(&account_id).unwrap(),
+                                    serde_json::to_string(&account_email).unwrap(),
                                 ))
                             }).unwrap()
                             .filter_map(|r| r.ok())
@@ -353,7 +451,7 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     let view = query_param(first_line, "view").unwrap_or_else(|| "all".to_string());
                     let sort = query_param(first_line, "sort").unwrap_or_else(|| "first".to_string());
                     let body = match Database::open(config_dir.join("messages.db").to_str().unwrap_or("messages.db")) {
-                        Ok(db) => match db.query_contacts(&view, &sort) {
+                        Ok(db) => match db.query_contacts_for(&view, &sort, query_param(first_line, "account").as_deref()) {
                             Ok(rows) => serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string()),
                             Err(e) => {
                                 warn!("GET /contacts: query failed: {}", e);
@@ -380,6 +478,24 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     let ok = Database::open(config_dir.join("messages.db").to_str().unwrap_or("messages.db"))
                         .and_then(|db| db.set_contact_favorite(&id, value))
                         .is_ok();
+                    let body = if ok { "ok" } else { "error" };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── POST /messages/read?id=ID&read=true|false — mark a message read/unread.
+                // Updates the local cache at once; the daemon pushes it to the provider. ──
+                if first_line.contains("POST /messages/read") {
+                    let id = query_param(first_line, "id").unwrap_or_default();
+                    let read = query_param(first_line, "read").as_deref() == Some("true");
+                    let ok = !id.is_empty()
+                        && Database::open(config_dir.join("messages.db").to_str().unwrap_or("messages.db"))
+                            .and_then(|db| db.set_message_read(&id, read))
+                            .is_ok();
                     let body = if ok { "ok" } else { "error" };
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -446,9 +562,11 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                         .unwrap_or_default();
 
                     let body = match Database::open(config_dir.join("messages.db").to_str().unwrap_or("messages.db")) {
-                        Ok(db) => match db.get_events_for_month(&month) {
+                        Ok(db) => match db.get_events_for_month_by_account(&month, query_param(first_line, "account").as_deref()) {
                             Ok(events) => serde_json::to_string(
-                                &events.iter().map(|e| serde_json::json!({
+                                &events.iter().map(|(e, account_id, account_email)| serde_json::json!({
+                                    "account_id": account_id,
+                                    "account_email": account_email,
                                     "id": e.id,
                                     "subject": e.subject,
                                     "body": e.body,
@@ -476,6 +594,38 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     continue;
                 }
 
+                // ── Sender preferences (Settings → Senders) ─────────────────────────────
+                //   GET  /settings/senders                                  → [{email, always_html, always_images}]
+                //   POST /settings/senders/add?email=E                      → {ok, status: added|exists|invalid}
+                //   POST /settings/senders/set?email=E&field=html|images&value=true|false
+                //   POST /settings/senders/remove?email=E
+                if first_line.contains("/settings/senders") {
+                    let body = sender_prefs_response(config_dir, first_line);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── GET /messages/body?id=ID — full body of one message: {"type","content"}.
+                // Served from the cache; otherwise fetched from the provider and cached.
+                // Runs on its own thread so a slow fetch never stalls the list requests. ──
+                if first_line.contains("GET /messages/body") {
+                    let id = query_param(first_line, "id").unwrap_or_default();
+                    let dir = config_dir.clone();
+                    std::thread::spawn(move || {
+                        let body = message_body_json(&dir, &id);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                    });
+                    continue;
+                }
+
                 // ── GET /messages — return messages as JSON (optional ?folder_id=) ──────────────
                 if first_line.contains("GET /messages") {
                     // Parse optional ?folder_id= query parameter
@@ -500,52 +650,58 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                                 let from_name: String = row.get::<_, Option<String>>(3)?.unwrap_or_default();
                                 let received_at: String = row.get(4)?;
                                 let is_read: bool = row.get(5)?;
+                                let account_id: String = row.get(6)?;
+                                let account_email: String = row.get(7)?;
                                 Ok(format!(
-                                    "{{\"id\":{},\"subject\":{},\"from_email\":{},\"from_name\":{},\"received_at\":{},\"is_read\":{}}}",
+                                    "{{\"id\":{},\"subject\":{},\"from_email\":{},\"from_name\":{},\"received_at\":{},\"is_read\":{},\"account_id\":{},\"account_email\":{}}}",
                                     serde_json::to_string(&id).unwrap(),
                                     serde_json::to_string(&subject).unwrap(),
                                     serde_json::to_string(&from_email).unwrap(),
                                     serde_json::to_string(&from_name).unwrap(),
                                     serde_json::to_string(&received_at).unwrap(),
-                                    is_read
+                                    is_read,
+                                    serde_json::to_string(&account_id).unwrap(),
+                                    serde_json::to_string(&account_email).unwrap(),
                                 ))
                             };
 
-                            let rows: Vec<String> = if let Some(ref fid) = folder_id {
-                                // Try folder-filtered first; fall back to unfiltered if nothing found
-                                // (covers existing messages whose folder_id was not yet backfilled)
-                                let mut stmt = conn.prepare(
-                                    "SELECT id, subject, from_email, from_name, received_at, is_read \
-                                     FROM messages WHERE folder_id = ?1 ORDER BY received_at DESC LIMIT 50"
-                                ).unwrap();
-                                let filtered: Vec<String> = stmt
-                                    .query_map([fid.as_str()], map_row)
-                                    .unwrap()
-                                    .filter_map(|r| r.ok())
-                                    .collect();
-
-                                if filtered.is_empty() {
-                                    // No folder_id matches — show all (pre-backfill state)
-                                    let mut stmt2 = conn.prepare(
-                                        "SELECT id, subject, from_email, from_name, received_at, is_read \
-                                         FROM messages ORDER BY received_at DESC LIMIT 50"
-                                    ).unwrap();
-                                    stmt2.query_map([], map_row)
-                                        .unwrap()
-                                        .filter_map(|r| r.ok())
-                                        .collect()
-                                } else {
-                                    filtered
-                                }
-                            } else {
-                                let mut stmt = conn.prepare(
-                                    "SELECT id, subject, from_email, from_name, received_at, is_read \
-                                     FROM messages ORDER BY received_at DESC LIMIT 50"
-                                ).unwrap();
-                                stmt.query_map([], map_row)
-                                    .unwrap()
-                                    .filter_map(|r| r.ok())
-                                    .collect()
+                            // Paged: ?limit= (default 200, max 1000) & ?offset=. The cache holds
+                            // tens of thousands of rows, so the UI pulls them a page at a time.
+                            // Optional filters: ?folder_id= and ?account=<id or email address>.
+                            let limit: i64 = query_param(first_line, "limit")
+                                .and_then(|v| v.parse().ok())
+                                .map(|n: i64| n.clamp(1, 1000))
+                                .unwrap_or(200);
+                            let offset: i64 = query_param(first_line, "offset")
+                                .and_then(|v| v.parse().ok())
+                                .map(|n: i64| n.max(0))
+                                .unwrap_or(0);
+                            let mut conds: Vec<String> = Vec::new();
+                            let mut args: Vec<rusqlite::types::Value> = Vec::new();
+                            if let Some(ref fid) = folder_id {
+                                args.push(fid.clone().into());
+                                conds.push(format!("m.folder_id = ?{}", args.len()));
+                            }
+                            if let Some(acct) = query_param(first_line, "account") {
+                                args.push(acct.into());
+                                let n = args.len();
+                                conds.push(format!("(m.account_id = ?{n} OR lower(a.email) = lower(?{n}))"));
+                            }
+                            let where_sql = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
+                            args.push(limit.into());
+                            args.push(offset.into());
+                            let sql = format!(
+                                "SELECT m.id, m.subject, m.from_email, m.from_name, m.received_at, m.is_read, \
+                                        COALESCE(m.account_id, ''), COALESCE(a.email, '') \
+                                 FROM messages m LEFT JOIN accounts a ON a.id = m.account_id{} \
+                                 ORDER BY m.received_at DESC LIMIT ?{} OFFSET ?{}",
+                                where_sql, args.len() - 1, args.len()
+                            );
+                            let rows: Vec<String> = match conn.prepare(&sql) {
+                                Ok(mut stmt) => stmt.query_map(rusqlite::params_from_iter(args.iter()), map_row)
+                                    .map(|it| it.filter_map(|r| r.ok()).collect())
+                                    .unwrap_or_default(),
+                                Err(e) => { warn!("GET /messages: bad query: {}", e); Vec::new() }
                             };
                             format!("[{}]", rows.join(","))
                         }
@@ -570,12 +726,13 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                         .and_then(|s| toml::from_str::<omarchylook::models::Settings>(&s).ok())
                     {
                         Some(settings) => format!(
-                            "{{\"sidebar_expanded\":{},\"window_width\":{},\"window_height\":{}}}",
+                            "{{\"sidebar_expanded\":{},\"window_width\":{},\"window_height\":{},\"message_rendering\":\"{}\"}}",
                             settings.ui.sidebar_expanded,
                             settings.ui.window_width,
                             settings.ui.window_height,
+                            omarchylook::settings::normalize_message_rendering(&settings.ui.message_rendering).unwrap_or("system_sender"),
                         ),
-                        None => "{\"sidebar_expanded\":true,\"window_width\":1280,\"window_height\":800}".to_string(),
+                        None => "{\"sidebar_expanded\":true,\"window_width\":1280,\"window_height\":800,\"message_rendering\":\"system_sender\"}".to_string(),
                     };
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -619,6 +776,24 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     continue;
                 }
 
+                // ── POST /settings/message_rendering?value=html|system|system_sender ──
+                if first_line.contains("POST /settings/message_rendering") {
+                    let wanted = query_param(first_line, "value").unwrap_or_default();
+                    let body = match omarchylook::settings::write_message_rendering(&config_dir.join("settings.toml"), &wanted) {
+                        Ok(stored) => format!("{{\"ok\":true,\"message_rendering\":\"{}\"}}", stored),
+                        Err(e) => {
+                            warn!("POST /settings/message_rendering {}: {}", wanted, e);
+                            "{\"ok\":false}".to_string()
+                        }
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
                 // ── POST /settings/sidebar_expanded — persist sidebar state ────
                 if first_line.contains("POST /settings/sidebar_expanded") {
                     // Body is "true" or "false" — read remaining request bytes
@@ -647,6 +822,8 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                 // ── POST trigger routes ────────────────────────────────────
                 let action = if first_line.contains("POST /auth/login") {
                     "login"
+                } else if first_line.contains("POST /auth/cancel") {
+                    "cancel"
                 } else if first_line.contains("POST /auth/logout") {
                     "logout"
                 } else if first_line.contains("POST /accounts/remove") {
@@ -669,15 +846,20 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     "login" => {
                         // New account: its id is generated as <provider>-<suffix>
                         let provider = query_param(first_line, "provider").unwrap_or_else(|| "exchange".to_string());
+                        let email = query_param(first_line, "email");
                         info!("🔔 HTTP trigger: add {} account requested", provider);
                         if let Some(scheduler) = SCHEDULER.get() {
                             let (config_dir, scheduler) = (config_dir.clone(), Arc::clone(scheduler));
                             std::thread::spawn(move || {
-                                if let Err(e) = omarchylook::account_ops::begin_add_account(&config_dir, &provider, scheduler) {
+                                if let Err(e) = omarchylook::account_ops::begin_add_account_with_hint(&config_dir, &provider, email.as_deref(), scheduler) {
                                     error!("❌ Add account failed: {}", e);
                                 }
                             });
                         }
+                    }
+                    "cancel" => {
+                        info!("🔔 HTTP trigger: cancel sign-in");
+                        omarchylook::google_auth::cancel_login(config_dir);
                     }
                     "logout" | "remove" => {
                         let id = query_param(first_line, "account")

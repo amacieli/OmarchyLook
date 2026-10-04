@@ -160,6 +160,60 @@ pub fn write_calendar_settings(path: &Path, wanted: &CalendarSettings) -> Result
     Ok(settings.calendar)
 }
 
+/// The accepted values of the message-rendering setting, or None for anything else.
+pub fn normalize_message_rendering(value: &str) -> Option<&'static str> {
+    match value {
+        "html" => Some("html"),
+        "system" => Some("system"),
+        "system_sender" => Some("system_sender"),
+        _ => None,
+    }
+}
+
+/// Persist the message-rendering mode into settings.toml, leaving every other setting as it
+/// was. Refuses an unknown value and a file that does not parse. Returns what was stored.
+pub fn write_message_rendering(path: &Path, value: &str) -> Result<String> {
+    let mode = normalize_message_rendering(value)
+        .ok_or_else(|| OmarchyError::SettingsError(format!("unknown message rendering mode: {}", value)))?;
+    let mut settings: Settings = match fs::read_to_string(path) {
+        Ok(content) => toml::from_str(&content).map_err(|e| OmarchyError::SettingsError(e.to_string()))?,
+        Err(_) => Settings::default(),
+    };
+    settings.ui.message_rendering = mode.to_string();
+    let content = toml::to_string_pretty(&settings).map_err(|e| OmarchyError::SettingsError(e.to_string()))?;
+    fs::write(path, content)?;
+    Ok(settings.ui.message_rendering)
+}
+
+#[cfg(test)]
+mod message_rendering_tests {
+    use super::*;
+
+    #[test]
+    fn modes_default_validate_and_persist() {
+        assert_eq!(Settings::default().ui.message_rendering, "system_sender");
+        assert_eq!(normalize_message_rendering("html"), Some("html"));
+        assert_eq!(normalize_message_rendering("Always HTML"), None);
+
+        let p = std::env::temp_dir().join(format!("omarchylook-render-{}.toml", std::process::id()));
+        let _ = fs::remove_file(&p);
+        let mut base = Settings::default();
+        base.ui.sidebar_expanded = false;
+        fs::write(&p, toml::to_string_pretty(&base).unwrap()).unwrap();
+        assert_eq!(write_message_rendering(&p, "system").unwrap(), "system");
+        assert!(write_message_rendering(&p, "bogus").is_err());
+        let back: Settings = toml::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.ui.message_rendering, "system");
+        assert!(!back.ui.sidebar_expanded, "other settings untouched");
+
+        // a settings file from before this setting existed still loads, with the default
+        let old = fs::read_to_string(&p).unwrap().lines().filter(|l| !l.starts_with("message_rendering")).collect::<Vec<_>>().join("\n");
+        let legacy: Settings = toml::from_str(&old).unwrap();
+        assert_eq!(legacy.ui.message_rendering, "system_sender");
+        let _ = fs::remove_file(&p);
+    }
+}
+
 #[cfg(test)]
 mod calendar_settings_tests {
     use super::*;

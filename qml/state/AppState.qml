@@ -14,7 +14,7 @@ Item {
     return (d && d.length > 0) ? d : Quickshell.env("HOME") + "/.config/omarchylook"
   }
   property bool backendOnline: false
-  onBackendOnlineChanged: if (backendOnline) loadCalendarSettings()
+  onBackendOnlineChanged: if (backendOnline) { loadCalendarSettings(); loadUiSettings(); loadSenders() }
   // Calendar view chosen in the calendar dropdown: day | workweek | week | month
   property string calendarMode: "month"
   // People view dropdowns: all | favorites | lists   and   first | last | company | recent
@@ -36,6 +36,7 @@ Item {
     { id: "account",       icon: "\uf007", label: "Accounts"      },
     { id: "appearance",    icon: "\uf1fc", label: "Appearance"    },
     { id: "mail",          icon: "\uf0e0", label: "Mail"          },
+    { id: "senders",       icon: "\uf2bd", label: "Senders"       },
     { id: "calendar",      icon: "\uf073", label: "Calendar"      },
     { id: "notifications", icon: "\uf0f3", label: "Notifications" },
     { id: "about",         icon: "\uf05a", label: "About"         }
@@ -59,8 +60,13 @@ Item {
 
   property string messagesStatus: ""
 
-  readonly property var currentMessage: messageModelObj.count > msgIndex && msgIndex >= 0
-    ? messageModelObj.get(msgIndex) : null
+  // _readRev is bumped whenever a row's read flag changes, so the reading pane's
+  // button label re-evaluates (ListModel.get() hands back a snapshot).
+  property int _readRev: 0
+  readonly property var currentMessage: {
+    _readRev
+    return messageModelObj.count > msgIndex && msgIndex >= 0 ? messageModelObj.get(msgIndex) : null
+  }
 
   readonly property string selectedFolderName: {
     var n = folderModelObj.count
@@ -69,11 +75,224 @@ Item {
     return "Inbox"
   }
 
-  readonly property int unreadCount: {
-    var c = 0
-    for (var i = 0; i < messageModelObj.count; i++)
-      if (!messageModelObj.get(i).is_read) c++
-    return c
+  // Counts come from the folder row (Graph's totalItemCount / unreadItemCount):
+  // the message list is paged, so counting the loaded rows would stop at the
+  // first page, and the cached per-message read flag is not reliable.
+  readonly property var selectedFolder: {
+    _readRev
+    for (var i = 0; i < folderModelObj.count; i++)
+      if (folderModelObj.get(i).id === selectedFolderId) return folderModelObj.get(i)
+    return null
+  }
+  readonly property int messageTotal: selectedFolder && selectedFolder.total_item_count > 0
+    ? selectedFolder.total_item_count : messageModelObj.count
+  readonly property int unreadCount: selectedFolder ? (selectedFolder.unread_item_count || 0) : 0
+
+  readonly property int messagePageSize: 200
+  property bool _hasMoreMessages: false
+  property bool _loadingMessages: false
+  property int _messageGeneration: 0
+
+  // ---- message body (reading pane) -----------------------------------------
+  // The list carries only previews; the full body is fetched when a message is
+  // opened (the backend caches it on disk, and the last few are kept here too).
+  // Which view a message opens in (Settings → Mail → Message rendering):
+  //   "html"          every message as HTML
+  //   "system"        every message in the system font
+  //   "system_sender" system font, unless the sender is listed with "always HTML"
+  // The HTML/System button (and the "view as HTML" bar) override it per message,
+  // for as long as the app is running.
+  property string messageRendering: "system_sender"
+  property var _htmlOverride: ({})
+  property int _htmlRev: 0
+
+  readonly property bool currentSenderAlwaysHtml: {
+    _imagesRev
+    for (var i = 0; i < senderModelObj.count; i++) {
+      var s = senderModelObj.get(i)
+      if (s.email === currentSenderEmail) return s.always_html === true
+    }
+    return false
+  }
+
+  readonly property bool currentHtmlOverridden: {
+    _htmlRev
+    return currentMessageId !== "" && _htmlOverride[currentMessageId] !== undefined
+  }
+
+  readonly property bool currentHtmlMode: {
+    _htmlRev
+    if (currentMessageId === "") return false
+    var o = _htmlOverride[currentMessageId]
+    if (o !== undefined) return o
+    if (messageRendering === "html") return true
+    if (messageRendering === "system") return false
+    return currentSenderAlwaysHtml
+  }
+
+  // Offer "view as HTML" (this message / always for this sender) only where it can
+  // matter: an HTML message, shown in the system font, in the mode that honours
+  // sender preferences, that the user has not already chosen a view for.
+  readonly property bool currentHtmlOffer:
+    !currentHtmlMode && !currentHtmlOverridden && messageRendering === "system_sender"
+    && currentBody.state === "ready" && currentBody.type === "html"
+
+  function toggleHtml() {
+    if (currentMessageId === "") return
+    _htmlOverride[currentMessageId] = !currentHtmlMode
+    _htmlRev++
+  }
+
+  // scope: "message" | "sender" (list the sender with always-HTML on).
+  function viewAsHtml(scope) {
+    var id = currentMessageId
+    if (id === "") return
+    _htmlOverride[id] = true
+    _htmlRev++
+    if (scope === "sender") _listSenderWith(currentSenderEmail, "html")
+  }
+
+  function setMessageRendering(mode) {
+    if (mode !== "html" && mode !== "system" && mode !== "system_sender") return
+    var before = messageRendering
+    messageRendering = mode
+    request("POST", "/settings/message_rendering?value=" + mode, function(xhr) {
+      var ok = false
+      try { ok = JSON.parse(xhr.responseText).ok === true } catch (e) { ok = false }
+      if (!ok) root.messageRendering = before
+    })
+  }
+  property var currentBody: ({ id: "", state: "idle", type: "", content: "" })
+  property var _bodyCache: ({})
+  property var _bodyOrder: []
+
+  readonly property string currentMessageId: currentMessage ? String(currentMessage.id || "") : ""
+  onCurrentMessageIdChanged: loadBody(currentMessageId)
+
+  function loadBody(id) {
+    if (id === "") { currentBody = { id: "", state: "idle", type: "", content: "" }; return }
+    var hit = _bodyCache[id]
+    if (hit) { currentBody = { id: id, state: "ready", type: hit.type, content: hit.content }; return }
+    currentBody = { id: id, state: "loading", type: "", content: "" }
+    request("GET", "/messages/body?id=" + encodeURIComponent(id), function(xhr) {
+      var result = null
+      if (xhr.status === 200) {
+        try { result = JSON.parse(xhr.responseText) } catch (e) { result = null }
+      }
+      var ok = result && result.error === undefined && result.type !== undefined
+      if (ok) {
+        _bodyCache[id] = { type: result.type, content: result.content }
+        _bodyOrder.push(id)
+        if (_bodyOrder.length > 30) delete _bodyCache[_bodyOrder.shift()]
+      }
+      if (root.currentMessageId !== id) return       // moved on while it loaded
+      root.currentBody = ok
+        ? { id: id, state: "ready", type: result.type, content: result.content }
+        : { id: id, state: "error", type: "", content: "",
+            reason: (result && result.error) ? String(result.error) : "could not load the message body",
+            preview: (result && result.preview) ? String(result.preview) : "" }
+    })
+  }
+
+  // ---- per-sender preferences (Settings → Senders) --------------------------
+  // [{ email, always_html, always_images }] from /settings/senders. Stored only;
+  // nothing in the reading pane consults them yet.
+  readonly property alias senderModel: senderModelObj
+  ListModel { id: senderModelObj }
+  property string senderNotice: ""
+
+  function loadSenders() {
+    request("GET", "/settings/senders", function(xhr) {
+      if (xhr.status !== 200) return
+      try {
+        var rows = JSON.parse(xhr.responseText)
+        if (!Array.isArray(rows)) return
+        senderModelObj.clear()
+        for (var i = 0; i < rows.length; i++) senderModelObj.append(rows[i])
+        root._imagesRev++
+      } catch (e) { console.log("[Senders] parse error:", e) }
+    })
+  }
+
+  function addSender(email, done) {
+    var e = String(email || "").trim()
+    if (e === "") { senderNotice = "Enter an email address."; if (done) done(false); return }
+    request("POST", "/settings/senders/add?email=" + encodeURIComponent(e), function(xhr) {
+      var r = null
+      try { r = JSON.parse(xhr.responseText) } catch (x) { r = null }
+      var status = r && r.status ? r.status : "error"
+      senderNotice = status === "added" ? ""
+        : (status === "exists" ? e.toLowerCase() + " is already listed."
+        : (status === "invalid" ? "That doesn't look like an email address."
+        : "Could not add the address."))
+      if (status === "added" || status === "exists") loadSenders()
+      if (done) done(status === "added")
+    })
+  }
+
+  // field: "html" | "images". Optimistic; put back if the backend refuses.
+  function setSenderPref(email, field, value) {
+    var key = field === "html" ? "always_html" : "always_images"
+    function apply(v) {
+      for (var i = 0; i < senderModelObj.count; i++)
+        if (senderModelObj.get(i).email === email) { senderModelObj.setProperty(i, key, v); return }
+    }
+    apply(value)
+    root._imagesRev++
+    request("POST", "/settings/senders/set?email=" + encodeURIComponent(email)
+            + "&field=" + field + "&value=" + value, function(xhr) {
+      var ok = false
+      try { ok = JSON.parse(xhr.responseText).ok === true } catch (x) { ok = false }
+      if (!ok) { apply(!value); root._imagesRev++ }
+    })
+  }
+
+  function removeSender(email) {
+    request("POST", "/settings/senders/remove?email=" + encodeURIComponent(email), function(xhr) {
+      loadSenders()
+    })
+  }
+
+  // ---- remote images in the HTML view ------------------------------------------
+  // Blocked unless this message was unblocked (kept for the session) or its sender
+  // is listed with "always load images" (Settings → Senders).
+  property var _imagesUnblocked: ({})
+  property int _imagesRev: 0
+
+  readonly property string currentSenderEmail:
+    currentMessage ? String(currentMessage.from_email || "").trim().toLowerCase() : ""
+
+  readonly property bool currentImagesAllowed: {
+    _imagesRev
+    if (currentMessageId === "") return false
+    if (_imagesUnblocked[currentMessageId] === true) return true
+    for (var i = 0; i < senderModelObj.count; i++) {
+      var s = senderModelObj.get(i)
+      if (s.email === currentSenderEmail) return s.always_images === true
+    }
+    return false
+  }
+
+  // scope: "message" = just this one (session only); "sender" = also list the sender
+  // with always-load-images on.
+  function unblockImages(scope) {
+    var id = currentMessageId
+    if (id === "") return
+    _imagesUnblocked[id] = true     // either way, load them now
+    _imagesRev++
+    if (scope === "sender") _listSenderWith(currentSenderEmail, "images")
+  }
+
+  // Make sure `email` is in the senders list with `field` ("html" | "images") on.
+  function _listSenderWith(email, field) {
+    if (email === "") return
+    request("POST", "/settings/senders/add?email=" + encodeURIComponent(email), function(xhr) {
+      var status = ""
+      try { status = JSON.parse(xhr.responseText).status } catch (e) { status = "" }
+      if (status !== "added" && status !== "exists") return
+      request("POST", "/settings/senders/set?email=" + encodeURIComponent(email)
+              + "&field=" + field + "&value=true", function(x2) { root.loadSenders() })
+    })
   }
 
   signal focusRequested()   // ask the shell to put keyboard focus back on the key catcher
@@ -180,22 +399,146 @@ Item {
     })
   }
 
+  // Folder rows carry the unread count the status bar shows; nudge it locally so it
+  // follows a toggle straight away (the next folder sync replaces it with the provider's).
+  function _bumpFolderUnread(folderId, delta) {
+    for (var i = 0; i < folderModelObj.count; i++) {
+      var f = folderModelObj.get(i)
+      if (f.id === folderId) {
+        folderModelObj.setProperty(i, "unread_item_count", Math.max(0, (f.unread_item_count || 0) + delta))
+        return
+      }
+    }
+  }
+
+  function _setRead(index, isRead) {
+    messageModelObj.setProperty(index, "is_read", isRead)
+    root._readRev++
+  }
+
+  // Mark the message at `index` read/unread (default: the one under the cursor).
+  // Optimistic: the row, the reading pane and the folder count change at once; the
+  // backend stores it and the daemon pushes it to the provider. A refused request
+  // puts everything back.
+  function toggleRead(index) {
+    var i = index === undefined ? msgIndex : index
+    if (i < 0 || i >= messageModelObj.count) return
+    var m = messageModelObj.get(i)
+    var id = m.id
+    var wasRead = !!m.is_read
+    var delta = wasRead ? 1 : -1
+    _setRead(i, !wasRead)
+    _bumpFolderUnread(selectedFolderId, delta)
+    request("POST", "/messages/read?id=" + encodeURIComponent(id) + "&read=" + (!wasRead), function(xhr) {
+      if (xhr.status === 200 && xhr.responseText === "ok") return
+      // Roll back — the list may have been reloaded meanwhile, so find the row by id.
+      for (var j = 0; j < messageModelObj.count; j++) {
+        if (messageModelObj.get(j).id === id) { root._setRead(j, wasRead); break }
+      }
+      root._bumpFolderUnread(root.selectedFolderId, -delta)
+    })
+  }
+
+  // Background refresh: the daemon changes read flags and folder counts on its own
+  // (sync, reads done in other clients), so pick those up without disturbing the
+  // cursor or scroll position. Rows are patched in place when the loaded ids still
+  // line up; if mail arrived or left, the first page is reloaded instead.
+  function refreshFolderCounts() {
+    request("GET", "/folders", function(xhr) {
+      if (xhr.status !== 200) return
+      try {
+        var folders = JSON.parse(xhr.responseText)
+        var same = folders.length === folderModelObj.count
+        for (var i = 0; same && i < folders.length; i++)
+          if (folders[i].id !== folderModelObj.get(i).id) same = false
+        if (!same) { loadFolders(); return }
+        for (var j = 0; j < folders.length; j++) {
+          var f = folderModelObj.get(j)
+          if (f.unread_item_count !== folders[j].unread_item_count)
+            folderModelObj.setProperty(j, "unread_item_count", folders[j].unread_item_count)
+          if (f.total_item_count !== folders[j].total_item_count)
+            folderModelObj.setProperty(j, "total_item_count", folders[j].total_item_count)
+        }
+        root._readRev++
+      } catch (e) { console.log("[Folders] refresh parse error:", e) }
+    })
+  }
+
+  function refreshMessages() {
+    if (_loadingMessages || messageModelObj.count === 0) return
+    var gen = root._messageGeneration
+    var n = Math.min(messageModelObj.count, 1000)
+    var path = "/messages?limit=" + n + "&offset=0"
+    if (root.selectedFolderId !== "") path += "&folder_id=" + encodeURIComponent(root.selectedFolderId)
+    request("GET", path, function(xhr) {
+      if (xhr.status !== 200 || gen !== root._messageGeneration || root._loadingMessages) return
+      try {
+        var rows = JSON.parse(xhr.responseText)
+        var aligned = rows.length === n
+        for (var i = 0; aligned && i < n; i++)
+          if (rows[i].id !== messageModelObj.get(i).id) aligned = false
+        if (!aligned) { if (messageModelObj.count <= root.messagePageSize) loadMessages(); return }
+        var changed = false
+        for (var j = 0; j < n; j++) {
+          if (!!messageModelObj.get(j).is_read !== !!rows[j].is_read) {
+            messageModelObj.setProperty(j, "is_read", rows[j].is_read)
+            changed = true
+          }
+        }
+        if (changed) root._readRev++
+      } catch (e) { console.log("[Messages] refresh parse error:", e) }
+    })
+  }
+
+  Timer {
+    interval: 20000
+    running: root.backendOnline
+    repeat: true
+    onTriggered: { root.refreshFolderCounts(); root.refreshMessages(); root.loadSenders() }
+  }
+
+  function _messagesPath(offset) {
+    var path = "/messages?limit=" + messagePageSize + "&offset=" + offset
+    if (root.selectedFolderId !== "") path += "&folder_id=" + encodeURIComponent(root.selectedFolderId)
+    return path
+  }
+
   function loadMessages() {
     root.messagesStatus = "…"
-    var path = "/messages"
-    if (root.selectedFolderId !== "") path += "?folder_id=" + encodeURIComponent(root.selectedFolderId)
-    request("GET", path, function(xhr) {
+    var gen = ++root._messageGeneration
+    root._loadingMessages = true
+    request("GET", _messagesPath(0), function(xhr) {
+      if (gen !== root._messageGeneration) return   // folder changed meanwhile
+      root._loadingMessages = false
       if (xhr.status === 200) {
         try {
           var messages = JSON.parse(xhr.responseText)
           messageModelObj.clear()
           for (var i = 0; i < messages.length; i++) messageModelObj.append(messages[i])
-          root.messagesStatus = messages.length + ""
+          root._hasMoreMessages = messages.length >= root.messagePageSize
+          root.messagesStatus = root.messageTotal.toLocaleString(Qt.locale("en_US"), "f", 0)
           if (root.msgIndex >= messageModelObj.count) root.msgIndex = Math.max(0, messageModelObj.count - 1)
         } catch (e) { root.messagesStatus = "err" }
       } else {
         root.messagesStatus = xhr.status === 0 ? "" : "e" + xhr.status
       }
+    })
+  }
+
+  // Next page of the open folder, appended below what is already loaded.
+  function loadMoreMessages() {
+    if (!_hasMoreMessages || _loadingMessages) return
+    var gen = root._messageGeneration
+    root._loadingMessages = true
+    request("GET", _messagesPath(messageModelObj.count), function(xhr) {
+      if (gen !== root._messageGeneration) return
+      root._loadingMessages = false
+      if (xhr.status !== 200) return
+      try {
+        var messages = JSON.parse(xhr.responseText)
+        for (var i = 0; i < messages.length; i++) messageModelObj.append(messages[i])
+        root._hasMoreMessages = messages.length >= root.messagePageSize
+      } catch (e) { console.log("[Messages] page parse error:", e) }
     })
   }
 
@@ -206,6 +549,8 @@ Item {
       if (xhr.status !== 200) return
       try {
         var s = JSON.parse(xhr.responseText)
+        if (s.message_rendering === "html" || s.message_rendering === "system" || s.message_rendering === "system_sender")
+          root.messageRendering = s.message_rendering
         if (typeof s.sidebar_expanded === "boolean") {
           root._applyingSettings = true
           root.sidebarExpanded = s.sidebar_expanded
@@ -232,6 +577,7 @@ Item {
       root.loadUiSettings()
       root.loadFolders()
       root.loadMessages()
+      root.loadSenders()
     }
   }
 

@@ -13,6 +13,28 @@ Item {
   property string selectedId: ""
   property bool paneFocused: false
 
+  // With more than one account, folders are grouped under the account's email address
+  // (section headers do not change model indices, so the keyboard cursor is unaffected).
+  property bool multiAccount: false
+  function recount() {
+    var seen = {}, n = 0
+    for (var i = 0; model && i < model.count; i++) {
+      var e = model.get(i).account_email || ""
+      if (!seen[e]) { seen[e] = true; n++ }
+    }
+    multiAccount = n > 1
+  }
+  onModelChanged: recount()
+  Connections {
+    target: root.model
+    ignoreUnknownSignals: true
+    function onCountChanged() { root.recount() }
+  }
+
+  // Rows that fit in one screenful (less one for overlap): the step PageUp/PageDown take.
+  readonly property int pageRows: list.count > 0 && list.contentHeight > 0
+    ? Math.max(1, Math.floor(list.height / (list.contentHeight / list.count)) - 1) : 1
+
   signal folderClicked(int index)
   signal refreshRequested()
 
@@ -50,6 +72,17 @@ Item {
       spacing: Style.spacing.xxs
       currentIndex: root.currentIndex
       onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
+
+      section.property: root.multiAccount ? "account_email" : ""
+      section.criteria: ViewSection.FullString
+      section.delegate: UiText {
+        width: list.width
+        topPadding: Style.spacing.sm
+        text: section
+        dim: true
+        elide: Text.ElideRight
+        font.pixelSize: Style.font.caption
+      }
 
       delegate: Item {
         id: rowItem

@@ -46,6 +46,7 @@ async-trait = "0.1"
 anyhow = "1.0"
 thiserror = "1.0"
 urlencoding = "2.1"
+base64 = "0.22"
 regex = "1.10"
 dirs = "7.0.0"
 

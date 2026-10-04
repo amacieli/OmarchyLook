@@ -4,7 +4,7 @@ import qs.Commons
 import qs.Ui
 import "../common"
 
-// Device-code login overlay. Same visual recipe as the kit's ConfirmDialog
+// Login overlay: Microsoft device code, or Gmail (address entry, then browser sign-in). Same visual recipe as the kit's ConfirmDialog
 // (scrim + accent-bordered card); its content is ours because ConfirmDialog
 // only supports a message and two buttons.
 Item {
@@ -42,17 +42,96 @@ Item {
 
         UiText {
           Layout.fillWidth: true
-          text: "Microsoft Authentication"
+          text: root.auth.loginProvider === "gmail" ? "Google Authentication" : "Microsoft Authentication"
           horizontalAlignment: Text.AlignHCenter
           foreground: Color.accent
           font.pixelSize: Style.font.title
           font.bold: true
         }
 
+        // Gmail step 1: which address?
+        ColumnLayout {
+          id: emailStep
+          Layout.fillWidth: true
+          visible: root.auth.needsEmail
+          spacing: Style.spacing.lg
+          onVisibleChanged: if (visible) { emailField.text = ""; emailField.forceActiveFocus() }
+
+          PanelSectionHeader { text: "YOUR GMAIL ADDRESS" }
+
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: Style.spacing.lg
+
+            TextField {
+              id: emailField
+              Layout.fillWidth: true
+              placeholderText: "name@gmail.com"
+              onAccepted: root.auth.submitEmail(text)
+            }
+            Button {
+              Layout.alignment: Qt.AlignVCenter
+              bordered: true
+              iconText: "\uf090"
+              text: "Continue"
+              onClicked: root.auth.submitEmail(emailField.text)
+            }
+          }
+
+          UiText {
+            Layout.fillWidth: true
+            visible: root.auth.errorMessage !== ""
+            text: root.auth.errorMessage
+            foreground: Color.urgent
+            wrapMode: Text.Wrap
+            horizontalAlignment: Text.AlignHCenter
+          }
+          UiText {
+            Layout.fillWidth: true
+            text: "Your browser opens Google's own sign-in page. omarchylook never sees your password."
+            dim: true
+            wrapMode: Text.Wrap
+            horizontalAlignment: Text.AlignHCenter
+            font.pixelSize: Style.font.caption
+          }
+        }
+
+        // Gmail step 2: waiting for the browser
+        ColumnLayout {
+          Layout.fillWidth: true
+          visible: root.auth.loginProvider === "gmail" && !root.auth.needsEmail && root.auth.errorMessage === ""
+          spacing: Style.spacing.lg
+
+          UiText {
+            Layout.fillWidth: true
+            text: "Finish signing in with Google in your browser…"
+            horizontalAlignment: Text.AlignHCenter
+          }
+          UiText {
+            Layout.fillWidth: true
+            horizontalAlignment: Text.AlignHCenter
+            text: {
+              var s = root.auth.secondsRemaining
+              var ss = s % 60
+              return "Waiting — gives up in " + Math.floor(s / 60) + ":" + (ss < 10 ? "0" + ss : ss)
+            }
+            dim: true
+            font.pixelSize: Style.font.caption
+          }
+          Button {
+            Layout.fillWidth: true
+            visible: root.auth.googleUrl !== ""
+            text: "Browser didn't open? Open sign-in page"
+            iconText: "\uf08e"
+            bordered: true
+            onClicked: Qt.openUrlExternally(root.auth.googleUrl)
+          }
+        }
+
         // waiting for code
         ColumnLayout {
           Layout.fillWidth: true
-          visible: root.auth.userCode === "" && root.auth.errorMessage === ""
+          visible: root.auth.loginProvider !== "gmail" && root.auth.userCode === "" && root.auth.errorMessage === ""
           spacing: Style.spacing.lg
 
           UiText {
@@ -72,7 +151,7 @@ Item {
         // code received
         ColumnLayout {
           Layout.fillWidth: true
-          visible: root.auth.userCode !== "" && root.auth.errorMessage === ""
+          visible: root.auth.loginProvider !== "gmail" && root.auth.userCode !== "" && root.auth.errorMessage === ""
           spacing: Style.spacing.lg
 
           PanelSectionHeader { text: "1. OPEN THIS URL IN YOUR BROWSER" }
@@ -139,7 +218,7 @@ Item {
         // error
         ColumnLayout {
           Layout.fillWidth: true
-          visible: root.auth.errorMessage !== ""
+          visible: root.auth.errorMessage !== "" && !root.auth.needsEmail
           spacing: Style.spacing.lg
 
           UiText {
@@ -155,7 +234,7 @@ Item {
             text: "Try again"
             iconText: "\uf021"
             bordered: true
-            onClicked: root.auth.startLogin()
+            onClicked: root.auth.startLogin(root.auth.loginProvider)
           }
         }
 

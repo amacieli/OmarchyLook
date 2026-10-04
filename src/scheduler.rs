@@ -13,7 +13,10 @@ use crate::calendar_daemon::{CalendarDaemon, CalendarDaemonConfig};
 use crate::contacts_daemon::{ContactsDaemon, ContactsDaemonConfig};
 use crate::db::Database;
 use crate::email_daemon::{DaemonConfig, EmailDaemon};
-use crate::providers::{GraphCalendarProvider, GraphContactsProvider, GraphEmailProvider};
+use crate::providers::{
+    CalendarProvider, ContactsProvider, EmailProvider, GmailProvider, GoogleCalendarProvider, GoogleContactsProvider,
+    GraphCalendarProvider, GraphContactsProvider, GraphEmailProvider,
+};
 use log::{error, info, warn};
 use std::collections::HashMap;
 use std::future::Future;
@@ -21,9 +24,32 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
-/// Providers that currently have sync implementations (Microsoft Graph).
+/// Providers that currently have sync implementations (Microsoft Graph, Gmail).
 pub fn is_supported(provider: &str) -> bool {
-    matches!(provider, "exchange" | "outlook")
+    matches!(provider, "exchange" | "outlook" | "gmail")
+}
+
+/// The three providers one account syncs through. Providers are built on their own daemon
+/// thread (`Rc`-free but not all `Send`-constructible), hence one small constructor per kind.
+fn email_provider(provider: &str, id: &str, db_path: &str) -> Arc<dyn EmailProvider> {
+    match provider {
+        "gmail" => Arc::new(GmailProvider::new(id, Some(PathBuf::from(db_path)))),
+        _ => Arc::new(GraphEmailProvider::new(AuthManager::for_account(id))),
+    }
+}
+
+fn calendar_provider(provider: &str, id: &str) -> Arc<dyn CalendarProvider> {
+    match provider {
+        "gmail" => Arc::new(GoogleCalendarProvider::new(id)),
+        _ => Arc::new(GraphCalendarProvider::new(AuthManager::for_account(id))),
+    }
+}
+
+fn contacts_provider(provider: &str, id: &str) -> Arc<dyn ContactsProvider> {
+    match provider {
+        "gmail" => Arc::new(GoogleContactsProvider::new(id)),
+        _ => Arc::new(GraphContactsProvider::new(AuthManager::for_account(id))),
+    }
 }
 
 pub struct SyncScheduler {
@@ -91,9 +117,9 @@ impl SyncScheduler {
         let cal_stop = Arc::new(Notify::new());
         let contacts_stop = Arc::new(Notify::new());
 
-        let (id, path) = (account_id.to_string(), self.db_str());
+        let (id, path, kind) = (account_id.to_string(), self.db_str(), provider.clone());
         spawn_sync_thread(format!("mail-{}", account_id), mail_stop.clone(), move || async move {
-            let provider = Arc::new(GraphEmailProvider::new(AuthManager::for_account(&id)));
+            let provider = email_provider(&kind, &id, &path);
             let db = match Database::open_for_account(&path, &id) {
                 Ok(db) => Arc::new(db),
                 Err(e) => return error!("Mail sync {}: cannot open database: {}", id, e),
@@ -102,9 +128,9 @@ impl SyncScheduler {
             EmailDaemon::new(cfg, db, provider).start().await;
         });
 
-        let (id, path, settings_path) = (account_id.to_string(), self.db_str(), self.settings_path.clone());
+        let (id, path, settings_path, kind) = (account_id.to_string(), self.db_str(), self.settings_path.clone(), provider.clone());
         spawn_sync_thread(format!("cal-{}", account_id), cal_stop.clone(), move || async move {
-            let provider = Arc::new(GraphCalendarProvider::new(AuthManager::for_account(&id)));
+            let provider = calendar_provider(&kind, &id);
             let db = match Database::open_for_account(&path, &id) {
                 Ok(db) => Arc::new(db),
                 Err(e) => return error!("Calendar sync {}: cannot open database: {}", id, e),
@@ -113,9 +139,9 @@ impl SyncScheduler {
             CalendarDaemon::new(cfg, db, provider).start().await;
         });
 
-        let (id, path) = (account_id.to_string(), self.db_str());
+        let (id, path, kind) = (account_id.to_string(), self.db_str(), provider.clone());
         spawn_sync_thread(format!("contacts-{}", account_id), contacts_stop.clone(), move || async move {
-            let provider = Arc::new(GraphContactsProvider::new(AuthManager::for_account(&id)));
+            let provider = contacts_provider(&kind, &id);
             let db = match Database::open_for_account(&path, &id) {
                 Ok(db) => Arc::new(db),
                 Err(e) => return error!("Contacts sync {}: cannot open database: {}", id, e),
@@ -182,8 +208,9 @@ mod tests {
     #[test]
     fn unsupported_providers_are_not_started() {
         let s = SyncScheduler::new(std::path::Path::new("/nonexistent"));
-        assert!(!s.start_account("gmail-abc123"));
-        assert!(!s.is_running("gmail-abc123"));
+        assert!(!s.start_account("imap-abc123"));
+        assert!(!s.is_running("imap-abc123"));
+        assert!(is_supported("gmail") && is_supported("exchange") && !is_supported("imap"));
     }
 
     #[test]

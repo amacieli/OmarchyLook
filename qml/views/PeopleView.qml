@@ -1,6 +1,8 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls
 import qs.Ui
+import "../common"
 
 // PeopleView — header (view dropdown, sort dropdown) above a contact list.
 // Every contact row has the same height: a name column, and a contact-info column with
@@ -9,6 +11,13 @@ import qs.Ui
 // Data source: http://127.0.0.1:27182/contacts?view=all|favorites|lists&sort=first|last|company|recent
 Rectangle {
     id: root
+
+    // PageUp/PageDown: the list has no keyboard cursor, so scroll it a screenful
+    // (less a little overlap), clamped to its ends.
+    function pageScroll(dir) {
+        var max = Math.max(0, list.contentHeight - list.height)
+        list.contentY = Math.max(0, Math.min(max, list.contentY + dir * list.height * 0.9))
+    }
     color: "#000000"
 
     // ── theme props forwarded from AppShell ───────────────────────
@@ -182,6 +191,7 @@ Rectangle {
             clip: true
             model: root.contacts
             boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: ThemedScrollBar {}
 
             // "Contact lists": group by folder (the backend already orders by folder)
             section.property: root.viewMode === "lists" ? "folder_name" : ""

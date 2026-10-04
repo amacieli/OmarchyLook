@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Controls
 import qs.Commons
 import qs.Ui
 import "../common"
@@ -16,8 +17,13 @@ Item {
   property int currentIndex: 0
   property bool paneFocused: false
 
+  // Rows that fit in one screenful (less one for overlap): the step PageUp/PageDown take.
+  readonly property int pageRows: list.count > 0 && list.contentHeight > 0
+    ? Math.max(1, Math.floor(list.height / (list.contentHeight / list.count)) - 1) : 1
+
   signal rowClicked(int index)
   signal refreshRequested()
+  signal endReached()   // scrolled (or j/k'd) near the bottom: ask for the next page
 
   implicitWidth: Style.space(360)
 
@@ -67,9 +73,16 @@ Item {
       Layout.fillWidth: true
       Layout.fillHeight: true
       clip: true
+      boundsBehavior: Flickable.StopAtBounds
+      ScrollBar.vertical: ThemedScrollBar {}
       model: root.model
       currentIndex: root.currentIndex
-      onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
+      onCurrentIndexChanged: {
+        positionViewAtIndex(currentIndex, ListView.Contain)
+        if (currentIndex >= count - 20) root.endReached()
+      }
+      onAtYEndChanged: if (atYEnd && count > 0) root.endReached()
+      onContentYChanged: if (count > 0 && contentY + height > contentHeight - height * 2) root.endReached()
 
       UiText {
         anchors.centerIn: parent

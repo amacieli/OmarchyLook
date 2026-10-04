@@ -50,8 +50,8 @@ SettingsPage {
   }
 
   function addAccount() {
-    var microsoft = page.newProvider === "exchange" || page.newProvider === "outlook"
-    if (!microsoft) {
+    var supported = page.newProvider === "exchange" || page.newProvider === "outlook" || page.newProvider === "gmail"
+    if (!supported) {
       page.notice = page.providerLabel(page.newProvider) + " sign-in isn't supported by the backend yet."
     } else {
       page.notice = ""

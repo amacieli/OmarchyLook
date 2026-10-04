@@ -23,7 +23,7 @@ fn parse_recipients(recipients_str: &str) -> Vec<String> {
 }
 
 /// ComposeBridge - QML-accessible email composition interface
-/// Handles form input and delegates send to GraphClient
+/// Handles form input and delegates send to the Graph provider
 pub struct ComposeBridge {
     to: String,
     cc: String,
