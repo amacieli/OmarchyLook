@@ -468,7 +468,7 @@ mod tests {
 
     // ── re-authentication prompt (test brokers use in-memory stores, never the real keyring) ──
     fn tok(a: &str, r: &str) -> crate::models::CachedToken {
-        crate::models::CachedToken { access_token: a.into(), refresh_token: Some(r.into()) }
+        crate::models::CachedToken { access_token: a.into(), refresh_token: Some(r.into()), expires_at: None }
     }
     fn setup(tag: &str) -> (std::path::PathBuf, SyncScheduler, String, String) {
         let dir = std::env::temp_dir().join(format!("omarchylook-reauth-{}-{}", tag, std::process::id()));

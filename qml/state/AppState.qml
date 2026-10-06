@@ -14,7 +14,27 @@ Item {
     return (d && d.length > 0) ? d : Quickshell.env("HOME") + "/.config/omarchylook"
   }
   property bool backendOnline: false
-  onBackendOnlineChanged: if (backendOnline) { loadCalendarSettings(); loadUiSettings(); loadSenders() }
+  onBackendOnlineChanged: {
+    if (backendOnline) { perfMark("backend first answered"); loadCalendarSettings(); loadUiSettings(); loadSenders() }
+  }
+
+  // ---- launch timing (see src/perf.rs): marks are queued until the backend answers, then
+  // posted to POST /perf so they land in the same ~/.config/omarchylook/perf.log timeline.
+  // Each carries its own QML-side age (ms since AppState was created).
+  property double _perfT0: Date.now()
+  property var _perfQueue: []
+  function perfMark(label) {
+    var text = label + " (qml +" + (Date.now() - _perfT0) + "ms)"
+    if (!backendOnline && label !== "backend first answered") { _perfQueue.push(text); return }
+    var q = _perfQueue; _perfQueue = []
+    q.push(text)
+    for (var i = 0; i < q.length; i++) {
+      var xhr = new XMLHttpRequest()
+      xhr.open("POST", backendUrl + "/perf?m=" + encodeURIComponent(q[i]), true)
+      xhr.send()
+    }
+  }
+  Component.onCompleted: perfMark("AppState created")
   // Calendar view chosen in the calendar dropdown: day | workweek | week | month
   property string calendarMode: "month"
   // People view dropdowns: all | favorites | lists   and   first | last | company | recent
@@ -477,7 +497,7 @@ Item {
         var aligned = rows.length === n
         for (var i = 0; aligned && i < n; i++)
           if (rows[i].id !== messageModelObj.get(i).id) aligned = false
-        if (!aligned) { if (messageModelObj.count <= root.messagePageSize) loadMessages(); return }
+        if (!aligned) { root.perfMark("refreshMessages: list changed on disk (new mail) -> reload"); if (messageModelObj.count <= root.messagePageSize) loadMessages(); return }
         var changed = false
         for (var j = 0; j < n; j++) {
           if (!!messageModelObj.get(j).is_read !== !!rows[j].is_read) {
@@ -497,13 +517,43 @@ Item {
     onTriggered: { root.refreshFolderCounts(); root.refreshMessages(); root.loadSenders() }
   }
 
+  // ---- backend change signal: the daemon bumps a counter whenever a sync stage changed what
+  // the mail UI shows (recent-50 stored, read flags, folder counts, new/older mail). Polling
+  // this tiny endpoint (no DB access) makes fresh mail appear within one tick of being
+  // stored. Fast (500 ms) for the first 90 s after launch while the stages land, then 3 s.
+  property int _syncSerial: -1
+  property bool _syncFast: true
+  Timer { interval: 90000; running: root.backendOnline; onTriggered: root._syncFast = false }
+  Timer {
+    interval: root._syncFast ? 500 : 3000
+    running: root.backendOnline
+    repeat: true
+    onTriggered: root.checkSyncSerial()
+  }
+  function checkSyncSerial() {
+    request("GET", "/sync/serial", function(xhr) {
+      if (xhr.status !== 200) return
+      var n = -1
+      try { n = JSON.parse(xhr.responseText).mail } catch (e) { return }
+      if (root._syncSerial === -1) { root._syncSerial = n; if (n === 0) return }
+      else if (n === root._syncSerial) return
+      root._syncSerial = n
+      root.perfMark("sync serial " + n + " seen -> refreshing mail UI")
+      root.refreshFolderCounts()
+      if (messageModelObj.count === 0) root.loadMessages()
+      else root.refreshMessages()
+    })
+  }
+
   function _messagesPath(offset) {
     var path = "/messages?limit=" + messagePageSize + "&offset=" + offset
     if (root.selectedFolderId !== "") path += "&folder_id=" + encodeURIComponent(root.selectedFolderId)
     return path
   }
 
+  property bool _perfFirstMessages: true
   function loadMessages() {
+    if (_perfFirstMessages) perfMark("first loadMessages request sent")
     root.messagesStatus = "…"
     var gen = ++root._messageGeneration
     root._loadingMessages = true
@@ -515,6 +565,8 @@ Item {
           var messages = JSON.parse(xhr.responseText)
           messageModelObj.clear()
           for (var i = 0; i < messages.length; i++) messageModelObj.append(messages[i])
+          if (root._perfFirstMessages && messages.length > 0) { root._perfFirstMessages = false; perfMark("EMAILS VISIBLE: model populated with " + messages.length + " rows") }
+          else if (messages.length > 0) perfMark("mail list reloaded: " + messages.length + " rows")
           root._hasMoreMessages = messages.length >= root.messagePageSize
           root.messagesStatus = root.messageTotal.toLocaleString(Qt.locale("en_US"), "f", 0)
           if (root.msgIndex >= messageModelObj.count) root.msgIndex = Math.max(0, messageModelObj.count - 1)

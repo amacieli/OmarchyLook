@@ -31,6 +31,11 @@ pub struct TokenResponse {
 pub struct CachedToken {
     pub access_token: String,
     pub refresh_token: Option<String>,
+    /// Unix seconds at which `access_token` expires. Lets the next launch reuse a still-valid
+    /// access token instead of refreshing. Absent in entries saved by older versions (and
+    /// then derived from the token's JWT `exp` claim where the token is a JWT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 /// Mail folder from Graph API / SQLite cache

@@ -54,10 +54,10 @@ fn url_decode(s: &str) -> String {
 fn main() {
     // Initialize logging
     init_logging();
+    let config_dir = get_config_dir();
+    omarchylook::perf::init(&config_dir);
     info!("OmarchyLook starting");
     
-    // Get configuration paths
-    let config_dir = get_config_dir();
     let db_path = config_dir.join("omarchy.db");
     let settings_path = config_dir.join("settings.toml");
     
@@ -153,6 +153,7 @@ fn launch_qml_app(config_dir: &PathBuf) {
     // `quickshell -p <dir>` runs <dir>/shell.qml as its own instance, independent
     // of the running omarchy-shell. CONFIG_DIR tells the UI where the backend
     // writes auth_state.json / device_code.json.
+    omarchylook::perf::mark("spawning quickshell");
     let mut cmd = Command::new("quickshell");
     cmd.arg("-p").arg(&qml_dir)
         .env("QML_DIR", &qml_dir)
@@ -177,7 +178,10 @@ fn launch_qml_app(config_dir: &PathBuf) {
 
 fn initialize_app(config_dir: &PathBuf, db_path: &str, settings_path: &str) -> omarchylook::errors::Result<()> {
     // Initialize database
-    let db = Arc::new(Database::open(db_path)?);
+    let db = {
+        let _t = omarchylook::perf::span("Database::open (schema init)");
+        Arc::new(Database::open(db_path)?)
+    };
     info!("Database initialized");
     
     // Initialize settings
@@ -185,8 +189,11 @@ fn initialize_app(config_dir: &PathBuf, db_path: &str, settings_path: &str) -> o
     info!("Settings initialized");
     
     // Initialize auth (check if already authenticated, but don't auto-prompt)
+    let _auth_span = omarchylook::perf::span("AuthManager::new + keyring check");
     let auth = AuthManager::new();
-    if auth.is_authenticated() {
+    let authed = auth.is_authenticated();
+    drop(_auth_span);
+    if authed {
         info!("User already authenticated (cached tokens available)");
         auth.write_state_file(config_dir)?;
         
@@ -211,7 +218,7 @@ fn initialize_app(config_dir: &PathBuf, db_path: &str, settings_path: &str) -> o
     // Per-account sync (mail + calendar threads for every signed-in account)
     let scheduler = Arc::new(omarchylook::scheduler::SyncScheduler::new(config_dir));
     let _ = SCHEDULER.set(Arc::clone(&scheduler));
-    std::thread::spawn(move || scheduler.start_all());
+    std::thread::Builder::new().name("scheduler".into()).spawn(move || scheduler.start_all()).ok();
     
     Ok(())
 }
@@ -367,6 +374,7 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
         Ok(l) => {
             eprintln!("[HTTP] ✅ Bound OK");
             info!("🌐 HTTP trigger server listening on http://127.0.0.1:27182");
+            omarchylook::perf::mark("http server bound");
             l
         }
         Err(e) => {
@@ -383,6 +391,29 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let request = String::from_utf8_lossy(&buf[..n]);
                 let first_line = request.lines().next().unwrap_or("");
+                let req_t = std::time::Instant::now();
+                // ── GET /sync/serial — cheap change counter the UI polls (no DB access)
+                if first_line.contains("GET /sync/serial") {
+                    let body = format!("{{\"mail\":{}}}", omarchylook::sync_state::mail_serial());
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+                if !first_line.contains("POST /perf") {
+                    omarchylook::perf::mark(&format!("http <- {}", first_line.split(" HTTP").next().unwrap_or("").chars().take(60).collect::<String>()));
+                }
+
+                // ── POST /perf?m=label — a mark from the QML side (shares this timeline)
+                if first_line.contains("POST /perf") {
+                    if let Some(m) = query_param(first_line, "m") {
+                        omarchylook::perf::mark(&format!("UI: {}", m));
+                    }
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 2\r\n\r\nok");
+                    continue;
+                }
 
                 // ── GET /folders — return cached folder list as JSON ──────────────
                 if first_line.contains("GET /folders") {
@@ -715,6 +746,7 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                         body.len(), body
                     );
                     let _ = stream.write_all(response.as_bytes());
+                    omarchylook::perf::mark(&format!("http -> GET /messages answered ({} bytes, handler {:.1}ms)", body.len(), req_t.elapsed().as_secs_f64() * 1000.0));
                     continue;
                 }
 

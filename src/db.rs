@@ -48,8 +48,18 @@ impl Database {
         let conn = Connection::open(path)
             .map_err(|e| OmarchyError::DatabaseError(e))?;
         
+        // WAL: background sync writers no longer block the HTTP server's readers (and the
+        // UI stays responsive during a crawl); NORMAL is the recommended pairing with WAL.
+        // busy_timeout covers the brief moments two writers collide.
+        conn.busy_timeout(std::time::Duration::from_secs(10)).map_err(OmarchyError::DatabaseError)?;
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+
         let db = Self { conn, account_id: account_id.to_string() };
         db.init_schema()?;
+        // Serves "newest N in folder" without scanning and sorting the whole table.
+        db.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_folder_received ON messages(folder_id, received_at DESC)", [])?;
         info!("Database initialized");
         
         Ok(db)
@@ -832,6 +842,38 @@ impl Database {
         }
 
         Ok(())
+    }
+
+    /// Insert many messages in ONE transaction (one fsync instead of one per row).
+    /// Returns how many were new. Rows that already exist are left alone, except that a
+    /// missing `folder_id` is backfilled (same rule as `insert_email`).
+    pub fn insert_emails_batch(&self, emails: &[EmailMessage]) -> Result<usize> {
+        if emails.is_empty() {
+            return Ok(0);
+        }
+        let now = Utc::now();
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> Result<usize> {
+            let mut ins = self.conn.prepare_cached(
+                "INSERT OR IGNORE INTO messages (id, subject, from_email, body, received_at, is_read, cached_at, folder_id, account_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")?;
+            let mut fix = self.conn.prepare_cached(
+                "UPDATE messages SET folder_id = ?1 WHERE id = ?2 AND folder_id IS NULL")?;
+            let mut new = 0usize;
+            for e in emails {
+                let n = ins.execute(params![e.id, e.subject, e.from, e.body, e.received, e.is_read, now, e.folder_id, self.account_id])?;
+                if n > 0 {
+                    new += 1;
+                } else if e.folder_id.is_some() {
+                    fix.execute(params![e.folder_id, e.id])?;
+                }
+            }
+            Ok(new)
+        })();
+        match result {
+            Ok(n) => { self.conn.execute_batch("COMMIT")?; Ok(n) }
+            Err(e) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(e) }
+        }
     }
 
     /// Upsert a folder from Graph API
@@ -1636,5 +1678,36 @@ mod multi_account_data_tests {
         assert!(known.contains("gmail-bbbbbb:1") && !known.contains("gmail-bbbbbb:3"));
         assert!(known_message_ids(std::path::Path::new("/nonexistent/x.db"), &ids).is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod batch_insert_tests {
+    use super::*;
+    use crate::models::EmailMessage;
+
+    fn msg(id: &str, folder: Option<&str>) -> EmailMessage {
+        EmailMessage { id: id.into(), from: "a@b.c".into(), subject: format!("s {id}"), received: "2026-10-06T12:00:00Z".into(),
+                       body: "p".into(), folder_id: folder.map(String::from), is_read: false }
+    }
+
+    #[test]
+    fn batch_counts_only_new_rows_and_is_idempotent() {
+        let db = Database::open(":memory:").unwrap();
+        let first = vec![msg("1", Some("f")), msg("2", Some("f")), msg("3", Some("f"))];
+        assert_eq!(db.insert_emails_batch(&first).unwrap(), 3);
+        let again = vec![msg("2", Some("f")), msg("3", Some("f")), msg("4", Some("f"))];
+        assert_eq!(db.insert_emails_batch(&again).unwrap(), 1, "only id 4 is new");
+        assert_eq!(db.insert_emails_batch(&[]).unwrap(), 0);
+        assert!(db.email_exists("4").unwrap());
+    }
+
+    #[test]
+    fn batch_backfills_missing_folder_id_on_existing_rows() {
+        let db = Database::open(":memory:").unwrap();
+        db.insert_emails_batch(&[msg("1", None)]).unwrap();
+        db.insert_emails_batch(&[msg("1", Some("inbox-id"))]).unwrap();
+        let n: i64 = db.conn.query_row("SELECT COUNT(*) FROM messages WHERE id='1' AND folder_id='inbox-id'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
     }
 }

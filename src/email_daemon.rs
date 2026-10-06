@@ -11,6 +11,8 @@ use crate::db::Database;
 use crate::models::Settings;
 use crate::providers::EmailProvider;
 use crate::errors::Result;
+use crate::perf;
+use crate::sync_state;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -74,13 +76,26 @@ impl EmailDaemon {
         // Poll every 5s while waiting for auth; switch to normal interval once synced
         let mut authenticated_once = false;
 
+        let acct = self.db.account_id().to_string();
+        perf::mark(&format!("mail[{}] daemon started", acct));
         loop {
-            match self.provider.is_token_valid().await {
+            let tok_t = Instant::now();
+            let token_check = self.provider.is_token_valid().await;
+            if !authenticated_once {
+                perf::mark(&format!("mail[{}] token check {:?} in {:.1}ms", acct, token_check.as_ref().ok(), tok_t.elapsed().as_secs_f64() * 1000.0));
+            }
+            match token_check {
                 Ok(true) => {
                     debug!("Token valid, proceeding with email sync");
 
                     let is_first_run = !authenticated_once;
                     authenticated_once = true;
+
+                    // Stage 1 (first cycle after launch): the 50 newest Inbox messages, before
+                    // anything else, so the UI can show fresh mail at once.
+                    if is_first_run {
+                        self.sync_recent(50).await;
+                    }
 
                     // Sync folders: on first authenticated run, or when interval elapsed
                     let should_sync_folders = last_folder_sync
@@ -88,10 +103,12 @@ impl EmailDaemon {
                         .unwrap_or(true);
 
                     if should_sync_folders {
+                        let _t = perf::span(format!("mail[{}] sync_folders", acct));
                         match self.sync_folders().await {
                             Ok(count) => {
                                 info!("Synced {} folders", count);
                                 last_folder_sync = Some(Instant::now());
+                                sync_state::bump_mail("folder counts updated");
                             }
                             Err(e) => {
                                 error!("Failed to sync folders: {}", e);
@@ -105,6 +122,7 @@ impl EmailDaemon {
                         .unwrap_or(true);
 
                     if should_sync_messages {
+                        let _t = perf::span(format!("mail[{}] sync_messages(first_run={}) TOTAL", acct, is_first_run));
                         match self.sync_messages(is_first_run).await {
                             Ok(count) => {
                                 if count > 0 {
@@ -119,6 +137,9 @@ impl EmailDaemon {
                             }
                         }
                     }
+
+                    // Safety net: whatever happened above, never hold calendar/contacts back.
+                    sync_state::open_gate(&acct);
 
                     // After a successful sync, sleep for the normal poll interval
                     tokio::time::sleep(message_interval).await;
@@ -166,12 +187,20 @@ impl EmailDaemon {
 
         // Read flags first: one cheap request per folder, so they are right within seconds
         // of launch instead of after the full paginated sync of every folder.
-        for folder in &folders {
-            self.reconcile_read_state(&folder.id, &folder.display_name).await;
+        {
+            let _t = perf::span(format!("mail[{}] reconcile_read_state x{} folders", self.db.account_id(), folders.len()));
+            for folder in &folders {
+                self.reconcile_read_state(&folder.id, &folder.display_name).await;
+            }
         }
+
+        // Priority stages done (recent 50, folders, read flags): calendar and contacts may
+        // start now, concurrently with the older-mail crawl below.
+        sync_state::open_gate(self.db.account_id());
 
         let mut total = 0;
         for folder in &folders {
+            let _t = perf::span(format!("mail[{}] folder '{}' sync", self.db.account_id(), folder.display_name));
             match self.sync_folder_messages(&folder.id, is_initial).await {
                 Ok(count) => total += count,
                 Err(e) => error!("Failed to sync folder {}: {}", folder.display_name, e),
@@ -204,7 +233,10 @@ impl EmailDaemon {
         match self.provider.fetch_unread_ids(folder_id).await {
             Ok(unread) => match self.db.reconcile_read_state(folder_id, &unread) {
                 Ok(0) => {}
-                Ok(n) => debug!("Read state: {} message(s) updated in {}", n, folder_name),
+                Ok(n) => {
+                    debug!("Read state: {} message(s) updated in {}", n, folder_name);
+                    sync_state::bump_mail("read flags changed");
+                }
                 Err(e) => error!("Read-state reconcile failed for {}: {}", folder_name, e),
             },
             Err(e) => warn!("Could not read unread list for {}: {}", folder_name, e),
@@ -228,28 +260,27 @@ impl EmailDaemon {
 
             let db = Arc::clone(&self.db);
             let mut inserted = 0usize;
+            let mut first_batch = true;
 
-            // Consume and persist each batch as it arrives
+            // Consume each page and persist it in ONE transaction (one fsync per page, and the
+            // write lock is held for microseconds so readers/UI never wait on it).
             while let Some(batch) = rx.recv().await {
-                for email in &batch {
-                    match db.email_exists(&email.id) {
-                        Ok(false) => {
-                            if let Err(e) = db.insert_email(email) {
-                                error!("Failed to insert email {}: {}", email.id, e);
-                            } else {
-                                inserted += 1;
-                            }
-                        }
-                        Ok(true) => {}
-                        Err(e) => error!("DB existence check failed: {}", e),
-                    }
+                if first_batch {
+                    first_batch = false;
+                    perf::mark(&format!("mail[{}] folder {} first page of {} received", db.account_id(), &folder_id[..folder_id.len().min(8)], batch.len()));
                 }
-                // debug!("Wrote batch of {} to DB (folder {})", batch.len(), folder_id);
+                match db.insert_emails_batch(&batch) {
+                    Ok(n) => inserted += n,
+                    Err(e) => error!("Failed to store page for {}: {}", folder_id, e),
+                }
                 tokio::task::yield_now().await;
             }
 
             if let Ok(Err(e)) = fetch_handle.await {
                 error!("Paginated fetch error for {}: {}", folder_id, e);
+            }
+            if inserted > 0 {
+                sync_state::bump_mail(&format!("crawl stored {} older/new messages", inserted));
             }
 
             Ok(inserted)
@@ -257,19 +288,36 @@ impl EmailDaemon {
             // Incremental: 50 most recent
             debug!("Incremental sync for folder: {}", folder_id);
             let emails = self.provider.fetch_folder_messages(folder_id, 50).await?;
-            let mut inserted = 0;
-            for email in emails {
-                match self.db.email_exists(&email.id) {
-                    Ok(false) => {
-                        self.db.insert_email(&email)?;
-                        inserted += 1;
-                        // debug!("Inserted email: {} from {}", email.subject, email.from);
-                    }
-                    Ok(true) => {}
-                    Err(e) => error!("Failed to check email existence: {}", e),
-                }
+            let inserted = self.db.insert_emails_batch(&emails)?;
+            if inserted > 0 {
+                sync_state::bump_mail(&format!("poll stored {} new messages", inserted));
             }
             Ok(inserted)
+        }
+    }
+
+    /// Stage 1 of a launch: the newest `limit` Inbox messages, stored in one transaction and
+    /// announced to the UI immediately. Errors are logged and ignored: the regular sync that
+    /// follows covers the same ground.
+    async fn sync_recent(&self, limit: usize) {
+        let acct = self.db.account_id().to_string();
+        let t = Instant::now();
+        let emails = match self.provider.fetch_inbox(limit).await {
+            Ok(e) => e,
+            Err(e) => {
+                warn!("Recent-mail fetch failed for {}: {}", acct, e);
+                return;
+            }
+        };
+        perf::mark(&format!("mail[{}] recent {}: fetched {} in {:.1}ms", acct, limit, emails.len(), t.elapsed().as_secs_f64() * 1000.0));
+        match self.db.insert_emails_batch(&emails) {
+            Ok(n) => {
+                perf::mark(&format!("mail[{}] recent {}: {} new stored", acct, limit, n));
+                if n > 0 {
+                    sync_state::bump_mail(&format!("recent {}: {} new", limit, n));
+                }
+            }
+            Err(e) => error!("Could not store recent mail for {}: {}", acct, e),
         }
     }
 }

@@ -28,12 +28,22 @@ const TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/to
 struct MsRefresher {
     /// Set once this account was found not to have consented to the full scope set;
     /// later refreshes then go straight to the base scopes (one instance per account).
+    /// Also persisted in `marker` so the next launch doesn't repeat the doomed first call
+    /// (a full extra round trip + TLS handshake before every cold refresh).
     full_scope_unavailable: std::sync::atomic::AtomicBool,
+    /// `<config dir>/token_scope_<account id>`; exists only while the base tier applies.
+    /// Holds no secret. Removed by a fresh sign-in (`reset`), the only way to gain scopes.
+    marker: std::path::PathBuf,
 }
 
 impl MsRefresher {
-    fn new() -> Self {
-        Self { full_scope_unavailable: std::sync::atomic::AtomicBool::new(false) }
+    fn new(account_id: &str) -> Self {
+        Self::with_marker(crate::google_auth::default_config_dir().join(format!("token_scope_{}", account_id)))
+    }
+
+    fn with_marker(marker: std::path::PathBuf) -> Self {
+        let base_tier = marker.exists();
+        Self { full_scope_unavailable: std::sync::atomic::AtomicBool::new(base_tier), marker }
     }
 
     /// One refresh attempt for `scope`. The bool is true when the failure only means a
@@ -82,8 +92,16 @@ impl Refresher for MsRefresher {
             warn!("Account has not consented to all scopes (e.g. Calendars/Contacts/Tasks ReadWrite); refreshing with read-only base scopes. \
                    Sign in to the account again to grant write access.");
             self.full_scope_unavailable.store(true, Ordering::Relaxed);
+            if let Err(e) = std::fs::write(&self.marker, b"base") {
+                warn!("Could not record the scope tier ({}): {}", self.marker.display(), e);
+            }
         }
         Self::attempt(refresh_token, GRAPH_SCOPE_BASE).0
+    }
+
+    fn reset(&self) {
+        self.full_scope_unavailable.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::remove_file(&self.marker);
     }
 }
 
@@ -127,7 +145,7 @@ pub fn broker_for(account_id: &str) -> Arc<TokenBroker> {
         if crate::accounts::provider_of(account_id) == "gmail" {
             Arc::new(crate::google_auth::GoogleRefresher::new())
         } else {
-            Arc::new(MsRefresher::new())
+            Arc::new(MsRefresher::new(account_id))
         },
     );
 
@@ -575,5 +593,31 @@ mod scope_tests {
         }
         assert!(!GRAPH_SCOPE.contains("Mail.Read ") && !GRAPH_SCOPE_BASE.contains("Mail.Read "));
         assert!(!GRAPH_SCOPE_BASE.contains("Tasks"));
+    }
+}
+
+#[cfg(test)]
+mod scope_marker_tests {
+    use super::*;
+    use crate::token_store::Refresher;
+    use std::sync::atomic::Ordering;
+
+    fn marker(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("omarchylook-scope-{}-{}", tag, std::process::id()))
+    }
+
+    #[test]
+    fn marker_selects_the_base_tier_and_a_fresh_sign_in_clears_it() {
+        let path = marker("tier");
+        let _ = std::fs::remove_file(&path);
+        assert!(!MsRefresher::with_marker(path.clone()).full_scope_unavailable.load(Ordering::Relaxed));
+
+        std::fs::write(&path, b"base").unwrap();
+        let r = MsRefresher::with_marker(path.clone());
+        assert!(r.full_scope_unavailable.load(Ordering::Relaxed), "next launch skips the doomed full-scope call");
+
+        r.reset();
+        assert!(!r.full_scope_unavailable.load(Ordering::Relaxed));
+        assert!(!path.exists(), "re-login must retry the full scope set");
     }
 }

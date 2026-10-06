@@ -13,6 +13,7 @@ use crate::db::Database;
 use crate::errors::Result;
 use crate::models::{Contact, ContactFolder};
 use crate::providers::ContactsProvider;
+use crate::perf;
 use log::{debug, error, info, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -50,6 +51,10 @@ impl ContactsDaemon {
         let mut last_sync: Option<Instant> = None;
         let mut authenticated_once = false;
 
+        // Mail's priority stages (recent 50, folders, read flags) go first.
+        let acct = self.db.account_id().to_string();
+        crate::sync_state::wait_gate(&acct, Duration::from_secs(60)).await;
+
         loop {
             match self.provider.is_token_valid().await {
                 Ok(true) => {
@@ -57,6 +62,7 @@ impl ContactsDaemon {
                     authenticated_once = true;
 
                     if last_folder_sync.map(|t| t.elapsed() >= folder_interval).unwrap_or(true) {
+                        let _t = perf::span(format!("contacts[{}] sync_folders", self.db.account_id()));
                         match self.sync_folders().await {
                             Ok(n) => {
                                 info!("Synced {} contact folders", n);
@@ -67,6 +73,7 @@ impl ContactsDaemon {
                     }
 
                     if is_first_run || last_sync.map(|t| t.elapsed() >= message_interval).unwrap_or(true) {
+                        let _t = perf::span(format!("contacts[{}] sync_contacts(first_run={})", self.db.account_id(), is_first_run));
                         match self.sync_contacts(is_first_run).await {
                             Ok(n) => {
                                 if n > 0 { info!("Synced {} contacts", n) } else { debug!("No contact changes") }

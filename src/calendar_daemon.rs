@@ -13,6 +13,7 @@
 //! - Events are upserted into SQLite so edits and reschedules propagate
 //! - Fully independent of the mail daemon: own provider, own DB handle, own loop
 
+use crate::perf;
 use chrono::{Duration as Days, Months, NaiveDate};
 use std::path::PathBuf;
 use crate::db::Database;
@@ -73,6 +74,11 @@ impl CalendarDaemon {
         let mut applied_years: Option<(i32, i32)> = None;
         let mut authenticated_once = false;
 
+        // Mail's priority stages first; calendar starts a few seconds after contacts.
+        let acct = self.db.account_id().to_string();
+        crate::sync_state::wait_gate(&acct, Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
         loop {
             match self.provider.is_token_valid().await {
                 Ok(true) => {
@@ -93,6 +99,7 @@ impl CalendarDaemon {
                         .map(|t| t.elapsed() >= Duration::from_secs(self.config.near_window_interval_secs))
                         .unwrap_or(true);
                     if full_due || near_due {
+                        let _t = perf::span(format!("calendar[{}] occurrences {}", self.db.account_id(), if full_due { "FULL window" } else { "near window" }));
                         let result = if full_due {
                             self.sync_full_window(today, years.0, years.1).await
                         } else {
@@ -113,6 +120,7 @@ impl CalendarDaemon {
                     }
 
                     if should_sync {
+                        let _t = perf::span(format!("calendar[{}] sync_events(first_run={})", self.db.account_id(), is_first_run));
                         match self.sync_events(is_first_run).await {
                             Ok(count) => {
                                 if count > 0 {

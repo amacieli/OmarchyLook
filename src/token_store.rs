@@ -155,6 +155,34 @@ pub enum RefreshOutcome {
 
 pub trait Refresher: Send + Sync {
     fn refresh(&self, refresh_token: &str) -> RefreshOutcome;
+
+    /// A fresh sign-in just stored new tokens for the account (so any per-account
+    /// knowledge about its old grant, e.g. "scope X was not consented", is stale).
+    fn reset(&self) {}
+}
+
+/// A stored access token must have at least this long left to be reused at launch
+/// (instead of refreshing): long enough to finish the startup requests.
+const REUSE_MARGIN: Duration = Duration::from_secs(300);
+
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// `exp` (unix seconds) from a JWT access token; None for opaque tokens (Google's `ya29...`).
+pub fn jwt_expiry(token: &str) -> Option<u64> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    if token.split('.').count() != 3 {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&bytes).ok()?["exp"].as_u64()
+}
+
+/// Expiry of a stored token: the recorded one, else the JWT claim.
+fn stored_expiry(t: &CachedToken) -> Option<u64> {
+    t.expires_at.or_else(|| jwt_expiry(&t.access_token))
 }
 
 struct State {
@@ -215,6 +243,20 @@ impl TokenBroker {
         if !st.loaded {
             st.stored = self.store.load(&self.account_id).ok().flatten();
             st.loaded = true;
+            // Launch fast path: the keyring holds the access token from the last run. If it is
+            // still good for a while, use it and skip the network refresh entirely.
+            if let Some(c) = st.stored.as_ref() {
+                if !c.access_token.is_empty() {
+                    if let Some(exp) = stored_expiry(c) {
+                        let now = unix_now();
+                        if exp > now + REUSE_MARGIN.as_secs() {
+                            debug!("Reusing stored access token for {} ({} s left)", self.account_id, exp - now);
+                            st.access = Some(c.access_token.clone());
+                            st.expires_at = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(exp));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -290,6 +332,7 @@ impl TokenBroker {
 
     /// Record tokens from a completed login (device flow).
     pub fn store_tokens(&self, resp: &TokenResponse) -> Result<()> {
+        self.refresher.reset();
         let mut st = self.lock();
         self.ensure_loaded(&mut st);
         st.retry_after = None;
@@ -307,6 +350,7 @@ impl TokenBroker {
 
     /// Take over credentials obtained under another id (re-login of an existing account).
     pub fn adopt(&self, token: &CachedToken) -> Result<()> {
+        self.refresher.reset();
         let mut st = self.lock();
         self.store.save(&self.account_id, token)?;
         st.stored = Some(token.clone());
@@ -336,7 +380,11 @@ impl TokenBroker {
             .refresh_token
             .clone()
             .or_else(|| st.stored.as_ref().and_then(|c| c.refresh_token.clone()));
-        let cached = CachedToken { access_token: resp.access_token.clone(), refresh_token: refresh };
+        let cached = CachedToken {
+            access_token: resp.access_token.clone(),
+            refresh_token: refresh,
+            expires_at: Some(unix_now() + resp.expires_in.max(0) as u64),
+        };
         if let Err(e) = self.store.save(&self.account_id, &cached) {
             // Keep working from memory; losing the rotated token on disk is the
             // lesser evil versus failing a request that already succeeded.
@@ -355,19 +403,23 @@ mod tests {
 
     struct FakeRefresher {
         calls: AtomicUsize,
+        resets: AtomicUsize,
         outcome: Mutex<Box<dyn Fn() -> RefreshOutcome + Send>>,
         delay: Duration,
     }
     impl FakeRefresher {
         fn new(f: impl Fn() -> RefreshOutcome + Send + 'static) -> Arc<Self> {
-            Arc::new(Self { calls: AtomicUsize::new(0), outcome: Mutex::new(Box::new(f)), delay: Duration::ZERO })
+            Arc::new(Self { calls: AtomicUsize::new(0), resets: AtomicUsize::new(0), outcome: Mutex::new(Box::new(f)), delay: Duration::ZERO })
         }
         fn slow(f: impl Fn() -> RefreshOutcome + Send + 'static, delay: Duration) -> Arc<Self> {
-            Arc::new(Self { calls: AtomicUsize::new(0), outcome: Mutex::new(Box::new(f)), delay })
+            Arc::new(Self { calls: AtomicUsize::new(0), resets: AtomicUsize::new(0), outcome: Mutex::new(Box::new(f)), delay })
         }
         fn calls(&self) -> usize { self.calls.load(Ordering::SeqCst) }
     }
     impl Refresher for FakeRefresher {
+        fn reset(&self) {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+        }
         fn refresh(&self, _rt: &str) -> RefreshOutcome {
             self.calls.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(self.delay);
@@ -383,7 +435,7 @@ mod tests {
     }
     fn seeded() -> Arc<MemoryStore> {
         let s = Arc::new(MemoryStore::default());
-        s.save("a", &CachedToken { access_token: "old".into(), refresh_token: Some("r1".into()) }).unwrap();
+        s.save("a", &CachedToken { access_token: "old".into(), refresh_token: Some("r1".into()), expires_at: None }).unwrap();
         s
     }
 
@@ -468,7 +520,7 @@ mod tests {
     #[test]
     fn accounts_are_isolated() {
         let store = seeded();
-        store.save("b", &CachedToken { access_token: "x".into(), refresh_token: Some("rb".into()) }).unwrap();
+        store.save("b", &CachedToken { access_token: "x".into(), refresh_token: Some("rb".into()), expires_at: None }).unwrap();
         let ra = FakeRefresher::new(|| RefreshOutcome::InvalidGrant("dead".into()));
         let a = TokenBroker::new("a", store.clone(), ra);
         let b = TokenBroker::new("b", store.clone(), FakeRefresher::new(|| RefreshOutcome::Ok(resp("newb", Some("rb2")))));
@@ -483,7 +535,7 @@ mod tests {
         let b = TokenBroker::new("a", store.clone(), FakeRefresher::new(|| RefreshOutcome::InvalidGrant("dead".into())));
         assert!(b.get_token().is_err());
         assert!(b.needs_reauth());
-        let fresh = CachedToken { access_token: "n".into(), refresh_token: Some("rn".into()) };
+        let fresh = CachedToken { access_token: "n".into(), refresh_token: Some("rn".into()), expires_at: None };
         b.adopt(&fresh).unwrap();
         assert!(b.is_authenticated());
         assert!(!b.needs_reauth());
@@ -491,9 +543,91 @@ mod tests {
         assert_eq!(b.snapshot().unwrap().refresh_token.as_deref(), Some("rn"));
     }
 
+    // ── launch fast path: reuse a still-valid stored access token ─────────
+    fn jwt_with_exp(exp: u64) -> String {
+        use base64::Engine;
+        let e = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        format!("{}.{}.sig", e.encode(r#"{"alg":"none"}"#), e.encode(format!(r#"{{"exp":{}}}"#, exp)))
+    }
+    fn store_with(t: CachedToken) -> Arc<MemoryStore> {
+        let s = Arc::new(MemoryStore::default());
+        s.save("a", &t).unwrap();
+        s
+    }
+
+    #[test]
+    fn valid_stored_token_is_reused_without_a_refresh() {
+        let t = CachedToken { access_token: "stored".into(), refresh_token: Some("r".into()), expires_at: Some(unix_now() + 3000) };
+        let r = FakeRefresher::new(|| RefreshOutcome::Ok(resp("new", None)));
+        let b = TokenBroker::new("a", store_with(t), r.clone());
+        assert_eq!(b.get_token().unwrap(), "stored");
+        assert_eq!(r.calls(), 0, "no network when the stored token is still good");
+    }
+
+    #[test]
+    fn stored_token_close_to_expiry_is_refreshed() {
+        let t = CachedToken { access_token: "stored".into(), refresh_token: Some("r".into()), expires_at: Some(unix_now() + 120) };
+        let r = FakeRefresher::new(|| RefreshOutcome::Ok(resp("new", None)));
+        let b = TokenBroker::new("a", store_with(t), r.clone());
+        assert_eq!(b.get_token().unwrap(), "new");
+        assert_eq!(r.calls(), 1);
+    }
+
+    #[test]
+    fn expired_stored_token_is_refreshed() {
+        let t = CachedToken { access_token: "stored".into(), refresh_token: Some("r".into()), expires_at: Some(unix_now().saturating_sub(10)) };
+        let r = FakeRefresher::new(|| RefreshOutcome::Ok(resp("new", None)));
+        let b = TokenBroker::new("a", store_with(t), r.clone());
+        assert_eq!(b.get_token().unwrap(), "new");
+        assert_eq!(r.calls(), 1);
+    }
+
+    #[test]
+    fn legacy_entry_without_expiry_uses_the_jwt_claim() {
+        let jwt = jwt_with_exp(unix_now() + 3000);
+        let t = CachedToken { access_token: jwt.clone(), refresh_token: Some("r".into()), expires_at: None };
+        let r = FakeRefresher::new(|| RefreshOutcome::Ok(resp("new", None)));
+        let b = TokenBroker::new("a", store_with(t), r.clone());
+        assert_eq!(b.get_token().unwrap(), jwt);
+        assert_eq!(r.calls(), 0);
+    }
+
+    #[test]
+    fn opaque_token_without_expiry_is_always_refreshed() {
+        // e.g. an entry saved by an older version for Google (ya29... is not a JWT)
+        let t = CachedToken { access_token: "ya29.opaque".into(), refresh_token: Some("r".into()), expires_at: None };
+        let r = FakeRefresher::new(|| RefreshOutcome::Ok(resp("new", None)));
+        let b = TokenBroker::new("a", store_with(t), r.clone());
+        assert_eq!(b.get_token().unwrap(), "new");
+        assert_eq!(r.calls(), 1);
+    }
+
+    #[test]
+    fn refresh_persists_the_expiry_and_old_entries_still_deserialize() {
+        let store = seeded();
+        let b = TokenBroker::new("a", store.clone(), FakeRefresher::new(|| RefreshOutcome::Ok(resp("new", Some("r2")))));
+        b.get_token().unwrap();
+        let exp = store.load("a").unwrap().unwrap().expires_at.expect("expiry saved");
+        assert!(exp > unix_now() + 3500 && exp <= unix_now() + 3600);
+        // an entry written before this field existed
+        let old: CachedToken = serde_json::from_str(r#"{"access_token":"x","refresh_token":"y"}"#).unwrap();
+        assert_eq!(old.expires_at, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("expires_at"));
+    }
+
+    #[test]
+    fn fresh_sign_in_resets_the_refresher() {
+        let store = seeded();
+        let r = FakeRefresher::new(|| RefreshOutcome::Ok(resp("new", None)));
+        let b = TokenBroker::new("a", store, r.clone());
+        b.store_tokens(&resp("login", Some("rl"))).unwrap();
+        b.adopt(&CachedToken { access_token: "n".into(), refresh_token: Some("rn".into()), expires_at: None }).unwrap();
+        assert_eq!(r.resets.load(Ordering::SeqCst), 2);
+    }
+
     // ── migration ────────────────────────────────────────────────
     fn legacy_json() -> String {
-        serde_json::to_string(&CachedToken { access_token: "acc".into(), refresh_token: Some("ref".into()) }).unwrap()
+        serde_json::to_string(&CachedToken { access_token: "acc".into(), refresh_token: Some("ref".into()), expires_at: None }).unwrap()
     }
 
     #[test]
@@ -561,7 +695,7 @@ mod keyring_live {
         }
         let id = format!("test-{}", std::process::id());
         let store = KeyringStore;
-        let t = CachedToken { access_token: "a".into(), refresh_token: Some("r".into()) };
+        let t = CachedToken { access_token: "a".into(), refresh_token: Some("r".into()), expires_at: None };
         store.save(&id, &t).unwrap();
         assert_eq!(store.load(&id).unwrap().unwrap().refresh_token.as_deref(), Some("r"));
         store.delete(&id).unwrap();

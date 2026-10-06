@@ -107,7 +107,8 @@ impl super::EmailProvider for GraphEmailProvider {
         // Use well-known names directly OR folder IDs
         let url = format!(
             "https://graph.microsoft.com/v1.0/me/mailFolders/{}/messages?\
-             $top={}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead,parentFolderId",
+             $top={}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead,parentFolderId\
+             &$orderby=receivedDateTime desc",
             folder_id, limit
         );
 
