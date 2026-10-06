@@ -147,6 +147,23 @@ pub fn read_calendar_settings(path: &Path) -> CalendarSettings {
         .sanitized()
 }
 
+/// Default and limits of the mail poll interval (`[sync] poll_interval_secs`).
+pub const DEFAULT_POLL_SECS: u64 = 60;
+pub const MIN_POLL_SECS: u64 = 10;
+pub const MAX_POLL_SECS: u64 = 3600;
+
+/// Mail poll interval from a settings.toml, in seconds: the default when the file is missing,
+/// unreadable or has no usable value, otherwise clamped to 10..=3600. Cheap enough to call
+/// every cycle, so an edit takes effect without restarting the app.
+pub fn read_poll_interval(path: &Path) -> u64 {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+        .and_then(|v| v.get("sync")?.get("poll_interval_secs")?.as_integer())
+        .map(|n| (n.max(0) as u64).clamp(MIN_POLL_SECS, MAX_POLL_SECS))
+        .unwrap_or(DEFAULT_POLL_SECS)
+}
+
 /// Persist calendar settings (clamped) into settings.toml, leaving every other setting as it
 /// was. Refuses to touch a file that does not parse. Returns what was stored.
 pub fn write_calendar_settings(path: &Path, wanted: &CalendarSettings) -> Result<CalendarSettings> {
@@ -269,3 +286,44 @@ mod calendar_settings_tests {
         let _ = fs::remove_file(&p);
     }
 }
+
+#[cfg(test)]
+mod poll_interval_tests {
+    use super::*;
+
+    fn file(tag: &str, content: Option<&str>) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("omarchylook-poll-{}-{}.toml", tag, std::process::id()));
+        match content {
+            Some(c) => fs::write(&p, c).unwrap(),
+            None => { let _ = fs::remove_file(&p); }
+        }
+        p
+    }
+
+    #[test]
+    fn reads_the_configured_value() {
+        assert_eq!(read_poll_interval(&file("v", Some("[sync]\npoll_interval_secs = 45\nauto_sync = true\n"))), 45);
+    }
+
+    #[test]
+    fn missing_file_or_section_gives_the_default() {
+        assert_eq!(read_poll_interval(&file("none", None)), DEFAULT_POLL_SECS);
+        assert_eq!(read_poll_interval(&file("nosec", Some("[ui]\nwindow_width = 1\n"))), DEFAULT_POLL_SECS);
+        assert_eq!(read_poll_interval(&file("bad", Some("not toml ["))), DEFAULT_POLL_SECS);
+    }
+
+    #[test]
+    fn out_of_range_values_are_clamped() {
+        assert_eq!(read_poll_interval(&file("lo", Some("[sync]\npoll_interval_secs = 1\n"))), MIN_POLL_SECS);
+        assert_eq!(read_poll_interval(&file("neg", Some("[sync]\npoll_interval_secs = -5\n"))), MIN_POLL_SECS);
+        assert_eq!(read_poll_interval(&file("hi", Some("[sync]\npoll_interval_secs = 999999\n"))), MAX_POLL_SECS);
+    }
+
+    #[test]
+    fn the_real_settings_file_shape_parses() {
+        // the section as written by SettingsManager (all keys present, plus other sections)
+        let toml = "[font]\nfamily = \"monospace\"\n\n[sync]\npoll_interval_secs = 60\nauto_sync = true\ncache_retention_days = 30\n";
+        assert_eq!(read_poll_interval(&file("real", Some(toml))), 60);
+    }
+}
+

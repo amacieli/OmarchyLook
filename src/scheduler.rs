@@ -117,14 +117,14 @@ impl SyncScheduler {
         let cal_stop = Arc::new(Notify::new());
         let contacts_stop = Arc::new(Notify::new());
 
-        let (id, path, kind) = (account_id.to_string(), self.db_str(), provider.clone());
+        let (id, path, kind, mail_settings) = (account_id.to_string(), self.db_str(), provider.clone(), self.settings_path.clone());
         spawn_sync_thread(format!("mail-{}", account_id), mail_stop.clone(), move || async move {
             let provider = email_provider(&kind, &id, &path);
             let db = match Database::open_for_account(&path, &id) {
                 Ok(db) => Arc::new(db),
                 Err(e) => return error!("Mail sync {}: cannot open database: {}", id, e),
             };
-            let cfg = DaemonConfig { poll_interval_secs: 120, folder_sync_interval_secs: 600, max_retries: 10 };
+            let cfg = DaemonConfig { settings_path: Some(mail_settings), ..DaemonConfig::default() };
             EmailDaemon::new(cfg, db, provider).start().await;
         });
 

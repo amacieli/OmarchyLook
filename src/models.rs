@@ -38,6 +38,26 @@ pub struct CachedToken {
     pub expires_at: Option<u64>,
 }
 
+/// One page of a provider change feed (Graph `messages/delta`).
+#[derive(Debug, Clone, Default)]
+pub struct DeltaPage {
+    /// New or changed messages.
+    pub upserts: Vec<EmailMessage>,
+    /// Ids that left the folder (deleted, or moved out).
+    pub removed: Vec<String>,
+    /// Link to resume the walk from after this page (set on every page but the last).
+    pub next_link: Option<String>,
+}
+
+/// How a delta walk ended.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeltaEnd {
+    /// Walk finished: store this link and use it next time.
+    Done(String),
+    /// The provider rejected the stored link (expired / malformed): start over from scratch.
+    Reset,
+}
+
 /// Mail folder from Graph API / SQLite cache
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MailFolder {

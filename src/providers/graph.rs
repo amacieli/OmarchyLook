@@ -1,7 +1,7 @@
 //! Microsoft Graph API email provider implementation
 
 use crate::errors::Result;
-use crate::models::{EmailMessage, MailFolder};
+use crate::models::{DeltaEnd, DeltaPage, EmailMessage, MailFolder};
 use crate::auth::AuthManager;
 use async_trait::async_trait;
 use log::{debug, error};
@@ -193,6 +193,104 @@ impl super::EmailProvider for GraphEmailProvider {
 
         debug!("Completed full sync of folder {}: {} messages total", folder_id, total);
         Ok(total)
+    }
+
+    fn supports_delta(&self) -> bool {
+        true
+    }
+
+    /// Graph `messages/delta`: the first call (no link) enumerates the folder newest-first, 500
+    /// per page; later calls with the stored deltaLink return only what changed (new, read-flag
+    /// changes, `@removed`). Pages are streamed to `tx` as they arrive.
+    async fn fetch_delta(
+        &self,
+        folder_id: &str,
+        link: Option<String>,
+        tx: tokio::sync::mpsc::Sender<DeltaPage>,
+    ) -> Result<DeltaEnd> {
+        let client = reqwest::Client::new();
+        let mut url = link.clone().unwrap_or_else(|| {
+            format!(
+                "https://graph.microsoft.com/v1.0/me/mailFolders/{}/messages/delta?\
+                 $select=id,subject,from,receivedDateTime,bodyPreview,isRead,parentFolderId",
+                folder_id
+            )
+        });
+        loop {
+            let token = self.get_token().await?;
+            let mut attempt = 0;
+            let body = loop {
+                let response = client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", token))
+                    .header("Prefer", "odata.maxpagesize=500")
+                    .send()
+                    .await
+                    .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+                let status = response.status();
+                if status.is_success() {
+                    break response
+                        .text()
+                        .await
+                        .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+                }
+                // A rejected stored link (expired state, malformed) means: start over.
+                if link.is_some() && matches!(status.as_u16(), 400 | 404 | 410) {
+                    debug!("Delta link for {} rejected ({}); resetting", folder_id, status);
+                    return Ok(DeltaEnd::Reset);
+                }
+                // Throttled / briefly unavailable: honour Retry-After a few times.
+                if matches!(status.as_u16(), 429 | 503 | 504) && attempt < 3 {
+                    attempt += 1;
+                    let wait = response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(2 * attempt as u64)
+                        .min(30);
+                    debug!("Delta request throttled ({}); retrying in {}s", status, wait);
+                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                    continue;
+                }
+                return Err(crate::errors::OmarchyError::HttpError(
+                    Self::check_response(response).await.err().map(|e| e.to_string()).unwrap_or_default(),
+                ));
+            };
+            let json: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+            let mut page = DeltaPage::default();
+            for item in json["value"].as_array().into_iter().flatten() {
+                if item.get("@removed").is_some() {
+                    if let Some(id) = item["id"].as_str() {
+                        page.removed.push(id.to_string());
+                    }
+                } else {
+                    page.upserts.push(Self::parse_message(item));
+                }
+            }
+            if let Some(done) = json["@odata.deltaLink"].as_str() {
+                if tx.send(page).await.is_err() {
+                    return Err(crate::errors::OmarchyError::HttpError("delta receiver dropped".into()));
+                }
+                return Ok(DeltaEnd::Done(done.to_string()));
+            }
+            match json["@odata.nextLink"].as_str() {
+                Some(next) => {
+                    page.next_link = Some(next.to_string());
+                    url = next.to_string();
+                    if tx.send(page).await.is_err() {
+                        return Err(crate::errors::OmarchyError::HttpError("delta receiver dropped".into()));
+                    }
+                }
+                None => {
+                    return Err(crate::errors::OmarchyError::HttpError(
+                        "delta response had neither nextLink nor deltaLink".into(),
+                    ))
+                }
+            }
+            tokio::task::yield_now().await;
+        }
     }
 
     async fn fetch_unread_ids(&self, folder_id: &str) -> Result<Vec<String>> {

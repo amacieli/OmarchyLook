@@ -4,7 +4,7 @@ use crate::errors::{OmarchyError, Result};
 use crate::accounts;
 use crate::models::{Account, CachedMessage, CalendarEvent, Contact, ContactAddress, ContactFolder, ContactPhone, ContactRow, EmailMessage, MailFolder, Message};
 use crate::token_store::DEFAULT_ACCOUNT;
-use log::{debug, info};
+use log::{debug, info, warn};
 use rusqlite::{Connection, params, OptionalExtension};
 use chrono::Utc;
 
@@ -60,6 +60,17 @@ impl Database {
         // Serves "newest N in folder" without scanning and sorting the whole table.
         db.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_folder_received ON messages(folder_id, received_at DESC)", [])?;
+        // Change-feed position per account + folder (Graph delta). `complete` = 0 while the
+        // first full enumeration is still running (the link then resumes it next launch).
+        db.conn.execute(
+            "CREATE TABLE IF NOT EXISTS mail_delta (
+                account_id TEXT NOT NULL,
+                folder_id  TEXT NOT NULL,
+                link       TEXT NOT NULL,
+                complete   INTEGER NOT NULL DEFAULT 0,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (account_id, folder_id)
+            )", [])?;
         info!("Database initialized");
         
         Ok(db)
@@ -470,7 +481,7 @@ impl Database {
     pub fn delete_account(&self, account_id: &str) -> Result<()> {
         self.conn.execute_batch("BEGIN")?;
         let result = (|| -> Result<()> {
-            for table in ["messages", "folders", "calendar_events", "contacts", "contact_folders"] {
+            for table in ["messages", "folders", "calendar_events", "contacts", "contact_folders", "mail_delta"] {
                 self.conn.execute(&format!("DELETE FROM {} WHERE account_id = ?1", table), params![account_id])?;
             }
             self.conn.execute("DELETE FROM accounts WHERE id = ?1", params![account_id])?;
@@ -874,6 +885,164 @@ impl Database {
             Ok(n) => { self.conn.execute_batch("COMMIT")?; Ok(n) }
             Err(e) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(e) }
         }
+    }
+
+    /// Read flag of one cached message (None if it is not cached).
+    pub fn message_is_read(&self, id: &str) -> Result<Option<bool>> {
+        Ok(self.conn
+            .query_row("SELECT is_read FROM messages WHERE id = ?1", params![id], |r| r.get::<_, bool>(0))
+            .optional()?)
+    }
+
+    // ───────────────────────────── change feed (Graph delta) ─────────────────────────────
+
+    /// Stored change-feed position of a folder: (link, complete).
+    pub fn delta_state(&self, folder_id: &str) -> Result<Option<(String, bool)>> {
+        match self.conn.query_row(
+            "SELECT link, complete FROM mail_delta WHERE account_id = ?1 AND folder_id = ?2",
+            params![self.account_id, folder_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
+        ) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn set_delta_state(&self, folder_id: &str, link: &str, complete: bool) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO mail_delta (account_id, folder_id, link, complete, updated_at)
+             VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+             ON CONFLICT(account_id, folder_id) DO UPDATE SET link = ?3, complete = ?4, updated_at = CURRENT_TIMESTAMP",
+            params![self.account_id, folder_id, link, complete as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_delta_state(&self, folder_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM mail_delta WHERE account_id = ?1 AND folder_id = ?2",
+            params![self.account_id, folder_id],
+        )?;
+        Ok(())
+    }
+
+    /// Apply one change-feed page in ONE transaction: insert new messages, update the read flag
+    /// and folder of existing ones (a message with an unpushed local read change keeps its local
+    /// flag), delete removed ones from `folder_id`. `progress` (the page's next link) is stored
+    /// in the same transaction so an interrupted first enumeration resumes where it stopped.
+    /// Returns (rows inserted or changed, rows deleted).
+    pub fn apply_delta_page(
+        &self,
+        folder_id: &str,
+        page: &crate::models::DeltaPage,
+        progress: Option<&str>,
+    ) -> Result<(usize, usize)> {
+        self.conn.execute_batch("BEGIN")?;
+        let result = (|| -> Result<(usize, usize)> {
+            let now = Utc::now();
+            let mut changed = 0usize;
+            {
+                let mut up = self.conn.prepare_cached(
+                    "INSERT INTO messages (id, subject, from_email, body, received_at, is_read, cached_at, folder_id, account_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(id) DO UPDATE SET
+                        is_read   = CASE WHEN messages.read_pending = 1 THEN messages.is_read ELSE excluded.is_read END,
+                        folder_id = excluded.folder_id
+                     WHERE (messages.read_pending = 0 AND messages.is_read != excluded.is_read)
+                        OR messages.folder_id IS NOT excluded.folder_id")?;
+                for e in &page.upserts {
+                    changed += up.execute(params![e.id, e.subject, e.from, e.body, e.received, e.is_read, now, e.folder_id, self.account_id])?;
+                }
+            }
+            let mut deleted = 0usize;
+            {
+                // Only from THIS folder: a message that was moved keeps its row via the other folder's feed.
+                let mut del = self.conn.prepare_cached("DELETE FROM messages WHERE id = ?1 AND folder_id = ?2")?;
+                for id in &page.removed {
+                    deleted += del.execute(params![id, folder_id])?;
+                }
+            }
+            if let Some(link) = progress {
+                self.conn.execute(
+                    "INSERT INTO mail_delta (account_id, folder_id, link, complete, updated_at)
+                     VALUES (?1, ?2, ?3, 0, CURRENT_TIMESTAMP)
+                     ON CONFLICT(account_id, folder_id) DO UPDATE SET link = ?3, complete = 0, updated_at = CURRENT_TIMESTAMP",
+                    params![self.account_id, folder_id, link],
+                )?;
+            }
+            Ok((changed, deleted))
+        })();
+        match result {
+            Ok(v) => { self.conn.execute_batch("COMMIT")?; Ok(v) }
+            Err(e) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(e) }
+        }
+    }
+
+    /// After a COMPLETE full enumeration of a folder: drop cached rows the provider no longer
+    /// has (deleted long ago, before change tracking existed). `seen` = every id the
+    /// enumeration returned; `started` = when it began, so rows stored since (e.g. by the
+    /// recent-50 fetch) are never touched.
+    ///
+    /// Safety: the enumeration must be believable. When the provider's own item count for the
+    /// folder is known, `seen` has to match it (within 2%, minimum 3: mail arrives and goes
+    /// while the walk runs); that is what lets a mostly-emptied folder such as Deleted Items be
+    /// cleaned. With no count to compare against, it refuses to delete more than 20% of the
+    /// folder. Returns rows deleted.
+    pub fn purge_unseen(
+        &self,
+        folder_id: &str,
+        seen: &std::collections::HashSet<String>,
+        started: chrono::DateTime<Utc>,
+    ) -> Result<usize> {
+        if seen.is_empty() {
+            return Ok(0);
+        }
+        let candidates: Vec<String> = {
+            let mut st = self.conn.prepare(
+                "SELECT id FROM messages WHERE folder_id = ?1 AND account_id = ?2 AND cached_at < ?3")?;
+            let rows = st.query_map(params![folder_id, self.account_id, started], |r| r.get::<_, String>(0))?;
+            rows.filter_map(|r| r.ok()).filter(|id| !seen.contains(id)).collect()
+        };
+        let total: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE folder_id = ?1 AND account_id = ?2",
+            params![folder_id, self.account_id], |r| r.get(0))?;
+        let server_total: Option<i64> = self.conn.query_row(
+            "SELECT total_item_count FROM folders WHERE id = ?1 AND account_id = ?2",
+            params![folder_id, self.account_id], |r| r.get::<_, Option<i64>>(0),
+        ).optional()?.flatten();
+        let believable = match server_total {
+            Some(t) => {
+                let slack = (t / 50).max(3);
+                (seen.len() as i64 - t).abs() <= slack
+            }
+            None => candidates.len() as i64 * 5 <= total,
+        };
+        if !believable {
+            warn!(
+                "Not purging {} of {} cached rows in folder {}: the enumeration ({} messages) does not match the provider's count ({:?})",
+                candidates.len(), total, folder_id, seen.len(), server_total
+            );
+            return Ok(0);
+        }
+        // Chunked: each delete also removes the row from the FTS index, which is not cheap.
+        let mut deleted = 0;
+        for chunk in candidates.chunks(200) {
+            self.conn.execute_batch("BEGIN")?;
+            let r = (|| -> Result<usize> {
+                let mut n = 0;
+                let mut del = self.conn.prepare_cached("DELETE FROM messages WHERE id = ?1")?;
+                for id in chunk {
+                    n += del.execute(params![id])?;
+                }
+                Ok(n)
+            })();
+            match r {
+                Ok(n) => { self.conn.execute_batch("COMMIT")?; deleted += n; }
+                Err(e) => { let _ = self.conn.execute_batch("ROLLBACK"); return Err(e); }
+            }
+        }
+        Ok(deleted)
     }
 
     /// Upsert a folder from Graph API

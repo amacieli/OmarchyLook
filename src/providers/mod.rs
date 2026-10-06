@@ -3,7 +3,7 @@
 //! Implementations: Graph API, Gmail API (IMAP future)
 
 use crate::errors::Result;
-use crate::models::{EmailMessage, MailFolder};
+use crate::models::{DeltaEnd, DeltaPage, EmailMessage, MailFolder};
 use async_trait::async_trait;
 
 /// Trait for email provider implementations (Graph, IMAP, etc.)
@@ -40,6 +40,24 @@ pub trait EmailProvider: Send + Sync {
     /// Set a message's read flag on the provider.
     async fn set_message_read(&self, _id: &str, _is_read: bool) -> Result<()> {
         Err(crate::errors::OmarchyError::HttpError("set_message_read not supported".into()))
+    }
+
+    /// True when the provider can report changes since a stored link (Graph delta), so the
+    /// daemon syncs by change feed instead of re-reading whole folders.
+    fn supports_delta(&self) -> bool {
+        false
+    }
+
+    /// Walk a folder's change feed. `link` None = full enumeration (newest first); Some = resume
+    /// from a stored delta/next link. Each page goes to `tx`. Returns the link to store, or
+    /// `DeltaEnd::Reset` when the provider rejects `link`.
+    async fn fetch_delta(
+        &self,
+        _folder_id: &str,
+        _link: Option<String>,
+        _tx: tokio::sync::mpsc::Sender<DeltaPage>,
+    ) -> Result<DeltaEnd> {
+        Err(crate::errors::OmarchyError::HttpError("delta not supported".into()))
     }
 
     /// Fetch all top-level mail folders
