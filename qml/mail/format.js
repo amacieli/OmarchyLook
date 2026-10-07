@@ -7,21 +7,31 @@ function senderName(m) {
   return m.from_name ? m.from_name : (m.from_email || "")
 }
 
+// Cached timestamps are UTC instants ("...Z" / with offset). Always render them in the
+// machine's local zone; never slice the string, which shows UTC wall-clock time.
+function _pad(n) { return n < 10 ? "0" + n : "" + n }
+
+function _parse(s) {
+  if (!s) return null
+  var str = String(s).trim()
+  // "YYYY-MM-DD HH:MM:SS" (SQLite style) with no zone designator is UTC by convention here.
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(str)) str = str.replace(" ", "T") + "Z"
+  var d = new Date(str)
+  return isNaN(d.getTime()) ? null : d
+}
+
 function listDate(s) {
-  s = s || ""
-  if (s.length >= 10) {
-    var d = new Date(s)
-    var now = new Date()
-    if (d.toDateString() === now.toDateString()) return s.substring(11, 16)
-    return s.substring(5, 10)
-  }
-  return s.substring(0, 10)
+  var d = _parse(s)
+  if (!d) return (s || "").substring(0, 10)
+  var now = new Date()
+  if (d.toDateString() === now.toDateString()) return _pad(d.getHours()) + ":" + _pad(d.getMinutes())
+  return _pad(d.getMonth() + 1) + "-" + _pad(d.getDate())
 }
 
 function fullDate(s) {
-  s = s || ""
-  if (s.length >= 16) return s.substring(0, 16).replace("T", "  ")
-  return s.substring(0, 10)
+  var d = _parse(s)
+  if (!d) return (s || "").substring(0, 10)
+  return d.getFullYear() + "-" + _pad(d.getMonth() + 1) + "-" + _pad(d.getDate()) + "  " + _pad(d.getHours()) + ":" + _pad(d.getMinutes())
 }
 
 function recipients(m) {
