@@ -125,6 +125,9 @@ with a **local copy** so nothing is lost offline or on a crash.
 - [ ] Tests: MIME builder snapshot tests (headers, boundaries, UTF-8 subject encoding, non-ASCII body).
 
 ### Phase D — C++ DocumentHandler plugin (spike first, 1 day box)
+**Spike result 2026-10-07: PASS.** A CMake `qt_add_qml_module` plugin (`OmarchyLook.Compose`, Qt 6.11.2) loads in
+Quickshell 0.3.1 via `QML_IMPORT_PATH`; a `DocumentHandler` bolded a TextEdit selection and `toHtml()` returned the expected
+span (verbose Qt HTML confirmed, so D2 `clean()` stays). Source: `plugin/omarchylook-compose/spike/`. WebEngine not tested (not needed).
 - [ ] Spike: confirm Quickshell loads a third-party QML module from an import path on this machine; confirm WebEngine
       is not viable (record result here either way).
 - [ ] `plugin/omarchylook-compose/` with `DocumentHandler` (bold, italic, underline, strike, font family/size,
