@@ -50,6 +50,7 @@ Item {
     { icon: "\uf073", label: "Calendar", view: "calendar" },
     { icon: "\uf0c0", label: "People",   view: "contacts" },
     { icon: "\uf0ae", label: "Tasks",    view: "tasks"    },
+    { icon: "\uf27a", label: "SMS",      view: "sms"      },
     { icon: "\uf013", label: "Settings", view: "settings", pinned: true }
   ]
 
@@ -59,6 +60,7 @@ Item {
     { id: "mail",          icon: "\uf0e0", label: "Mail"          },
     { id: "senders",       icon: "\uf2bd", label: "Senders"       },
     { id: "calendar",      icon: "\uf073", label: "Calendar"      },
+    { id: "sms",           icon: "\uf27a", label: "SMS"           },
     { id: "notifications", icon: "\uf0f3", label: "Notifications" },
     { id: "about",         icon: "\uf05a", label: "About"         }
   ]
@@ -437,8 +439,6 @@ Item {
     root._readRev++
   }
 
-  // Mark the message at `index` read/unread (default: the one under the cursor).
-  // Optimistic: the row, the reading pane and the folder count change at once; the
   // ---- compose ---------------------------------------------------------------------------
   // The compose pane takes the reading pane's slot while `composing`. This is state + intents
   // only; sending is not wired to the backend yet (PLAN-compose.md Phase A), so submitCompose
@@ -659,6 +659,8 @@ Item {
     return false
   }
 
+  // Mark the message at `index` read/unread (default: the one under the cursor).
+  // Optimistic: the row, the reading pane and the folder count change at once; the
   // backend stores it and the daemon pushes it to the provider. A refused request
   // puts everything back.
   function toggleRead(index) {
