@@ -223,6 +223,27 @@ impl Database {
             [],
         )?;
 
+        // Outgoing mail: queued when the user presses Send, sent by the account's outbox worker
+        // once `send_at` (unix ms) passes. state: pending | sending | sent | failed | cancelled.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS outbox (
+                id TEXT PRIMARY KEY,
+                account_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                send_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )?;
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(account_id, state, send_at)",
+            [],
+        )?;
+
         // Calendar events (separate from mail; created if not present)
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS calendar_events (
@@ -747,6 +768,146 @@ impl Database {
             |r| r.get::<_, Option<String>>(0),
         ) {
             Ok(a) => Ok(a),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    // ── outbox ───────────────────────────────────────────────────────────────────────────────
+
+    pub fn now_ms() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    /// Queue a message to go out at `send_at_ms`.
+    pub fn outbox_enqueue(&self, id: &str, account_id: &str, payload_json: &str, send_at_ms: i64) -> Result<()> {
+        let now = Self::now_ms();
+        self.conn.execute(
+            "INSERT INTO outbox (id, account_id, payload_json, state, attempts, send_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 'pending', 0, ?4, ?5, ?5)",
+            params![id, account_id, payload_json, send_at_ms, now],
+        )?;
+        Ok(())
+    }
+
+    /// Take every due message of `account_id` (pending, `send_at` passed) and mark it `sending`.
+    /// The state change is the claim: a message cancelled in the meantime is not returned, and
+    /// two workers can never both get the same one.
+    pub fn outbox_claim_due(&self, account_id: &str, now_ms: i64) -> Result<Vec<(String, String, i64)>> {
+        let due: Vec<(String, String, i64)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, payload_json, attempts FROM outbox
+                 WHERE account_id = ?1 AND state = 'pending' AND send_at <= ?2 ORDER BY send_at, created_at",
+            )?;
+            let rows = stmt
+                .query_map(params![account_id, now_ms], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut claimed = Vec::new();
+        for (id, payload, attempts) in due {
+            let n = self.conn.execute(
+                "UPDATE outbox SET state = 'sending', attempts = attempts + 1, updated_at = ?2
+                 WHERE id = ?1 AND state = 'pending'",
+                params![id, now_ms],
+            )?;
+            if n == 1 {
+                claimed.push((id, payload, attempts + 1));
+            }
+        }
+        Ok(claimed)
+    }
+
+    /// When the earliest still-pending message of the account is due (unix ms).
+    pub fn outbox_next_due(&self, account_id: &str) -> Result<Option<i64>> {
+        match self.conn.query_row(
+            "SELECT MIN(send_at) FROM outbox WHERE account_id = ?1 AND state = 'pending'",
+            params![account_id],
+            |r| r.get::<_, Option<i64>>(0),
+        ) {
+            Ok(v) => Ok(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn outbox_mark_sent(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE outbox SET state = 'sent', last_error = NULL, updated_at = ?2 WHERE id = ?1",
+            params![id, Self::now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// A transient failure: back to `pending`, due again at `retry_at_ms`.
+    pub fn outbox_mark_retry(&self, id: &str, error: &str, retry_at_ms: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE outbox SET state = 'pending', last_error = ?2, send_at = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, error, retry_at_ms, Self::now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn outbox_mark_failed(&self, id: &str, error: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE outbox SET state = 'failed', last_error = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, error, Self::now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Take a message back. Only possible while it is still `pending`; returns whether it was.
+    pub fn outbox_cancel(&self, id: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE outbox SET state = 'cancelled', updated_at = ?2 WHERE id = ?1 AND state = 'pending'",
+            params![id, Self::now_ms()],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// `(state, last_error, attempts)` of a queued message.
+    pub fn outbox_status(&self, id: &str) -> Result<Option<(String, Option<String>, i64)>> {
+        match self.conn.query_row(
+            "SELECT state, last_error, attempts FROM outbox WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// After a crash: a message left `sending` may or may not have gone out. It is reported
+    /// rather than sent again, because a second copy is worse than asking the user to look.
+    pub fn outbox_fail_interrupted(&self, account_id: &str) -> Result<usize> {
+        Ok(self.conn.execute(
+            "UPDATE outbox SET state = 'failed', updated_at = ?2,
+                 last_error = 'interrupted while sending: check your Sent folder before sending again'
+             WHERE account_id = ?1 AND state = 'sending'",
+            params![account_id, Self::now_ms()],
+        )?)
+    }
+
+    /// Housekeeping: forget finished messages older than `max_age_ms`.
+    pub fn outbox_prune(&self, max_age_ms: i64) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM outbox WHERE state IN ('sent', 'cancelled') AND updated_at < ?1",
+            params![Self::now_ms() - max_age_ms],
+        )?)
+    }
+
+    /// The signed-in address of an account, for the From line.
+    pub fn account_email(&self, account_id: &str) -> Result<Option<String>> {
+        match self.conn.query_row(
+            "SELECT email FROM accounts WHERE id = ?1",
+            params![account_id],
+            |r| r.get::<_, Option<String>>(0),
+        ) {
+            Ok(v) => Ok(v.filter(|e| !e.is_empty())),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -1880,3 +2041,55 @@ mod batch_insert_tests {
         assert_eq!(n, 1);
     }
 }
+
+#[cfg(test)]
+mod outbox_tests {
+    use super::*;
+
+    #[test]
+    fn queue_claim_cancel_and_retry() {
+        let db = Database::open_for_account(":memory:", "a1").unwrap();
+        db.outbox_enqueue("o1", "a1", "{}", 1_000).unwrap();
+        db.outbox_enqueue("o2", "a1", "{}", 5_000).unwrap();
+        db.outbox_enqueue("o3", "other", "{}", 0).unwrap();
+        assert_eq!(db.outbox_next_due("a1").unwrap(), Some(1_000));
+
+        // nothing is due before its time; another account's rows are never touched
+        assert!(db.outbox_claim_due("a1", 999).unwrap().is_empty());
+        let got = db.outbox_claim_due("a1", 1_000).unwrap();
+        assert_eq!(got.iter().map(|g| g.0.as_str()).collect::<Vec<_>>(), vec!["o1"]);
+        assert_eq!(got[0].2, 1, "attempt number");
+        assert_eq!(db.outbox_status("o1").unwrap().unwrap().0, "sending");
+        assert!(db.outbox_claim_due("a1", 1_000).unwrap().is_empty(), "a claimed message is not claimed twice");
+        assert_eq!(db.outbox_next_due("a1").unwrap(), Some(5_000));
+
+        // undo works while pending, not once sending
+        assert!(db.outbox_cancel("o2").unwrap());
+        assert!(!db.outbox_cancel("o2").unwrap());
+        assert!(!db.outbox_cancel("o1").unwrap(), "too late: already sending");
+        assert!(db.outbox_claim_due("a1", 99_999).unwrap().is_empty(), "cancelled never goes out");
+
+        // transient failure: pending again, later, with the error kept; attempts keep counting
+        db.outbox_mark_retry("o1", "offline", 7_000).unwrap();
+        assert_eq!(db.outbox_next_due("a1").unwrap(), Some(7_000));
+        let again = db.outbox_claim_due("a1", 7_000).unwrap();
+        assert_eq!(again[0].2, 2);
+        db.outbox_mark_sent("o1").unwrap();
+        let st = db.outbox_status("o1").unwrap().unwrap();
+        assert_eq!((st.0.as_str(), st.1), ("sent", None));
+        assert!(db.outbox_status("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_crash_mid_send_is_reported_not_resent() {
+        let db = Database::open_for_account(":memory:", "a1").unwrap();
+        db.outbox_enqueue("o1", "a1", "{}", 0).unwrap();
+        db.outbox_claim_due("a1", 1).unwrap();
+        assert_eq!(db.outbox_fail_interrupted("a1").unwrap(), 1);
+        let st = db.outbox_status("o1").unwrap().unwrap();
+        assert_eq!(st.0, "failed");
+        assert!(st.1.unwrap().contains("Sent folder"));
+        assert!(db.outbox_claim_due("a1", 99).unwrap().is_empty());
+    }
+}
+

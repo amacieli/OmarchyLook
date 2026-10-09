@@ -4,7 +4,7 @@ use crate::errors::Result;
 use crate::models::{DeltaEnd, DeltaPage, EmailMessage, MailFolder};
 use crate::auth::AuthManager;
 use async_trait::async_trait;
-use log::{debug, error};
+use log::{debug, error, warn};
 use tokio::sync::Mutex;
 
 pub struct GraphEmailProvider {
@@ -332,6 +332,67 @@ impl super::EmailProvider for GraphEmailProvider {
             .await
             .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
         Self::check_response(response).await.map(|_| ())
+    }
+
+    async fn send_message(&self, msg: &crate::compose::OutgoingMessage, _from: &str) -> Result<()> {
+        use crate::compose::{graph_message_json, graph_send_mail_json};
+        let token = self.get_token().await?;
+        let client = reqwest::Client::new();
+        let call = |method: reqwest::Method, path: String, body: Option<serde_json::Value>| {
+            let mut req = client
+                .request(method, format!("https://graph.microsoft.com/v1.0{}", path))
+                .header("Authorization", format!("Bearer {}", token));
+            if let Some(b) = body {
+                req = req.json(&b);
+            }
+            async move {
+                let resp = req.send().await.map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+                Self::check_response(resp).await
+            }
+        };
+        let send_new = || call(reqwest::Method::POST, "/me/sendMail".into(), Some(graph_send_mail_json(msg)));
+
+        if !(msg.is_reply() || msg.is_forward()) {
+            return send_new().await.map(|_| ());
+        }
+
+        // Reply / forward: let Graph build the draft so the conversation stays threaded, then
+        // replace its body and recipients with what the user wrote, and send it.
+        let action = match msg.kind.as_str() {
+            "replyAll" => "createReplyAll",
+            "forward" => "createForward",
+            _ => "createReply",
+        };
+        let orig = urlencoding::encode(&msg.in_reply_to).into_owned();
+        let draft = match call(reqwest::Method::POST, format!("/me/messages/{}/{}", orig, action), Some(serde_json::json!({}))).await {
+            Ok(text) => text,
+            // The original is gone: send what was written as a new message rather than lose it.
+            Err(crate::errors::OmarchyError::HttpError(m)) if m.contains("Graph API error: 404") => {
+                warn!("Graph: message {} no longer exists; sending as a new message", msg.in_reply_to);
+                return send_new().await.map(|_| ());
+            }
+            Err(e) => return Err(e),
+        };
+        let draft_id = serde_json::from_str::<serde_json::Value>(&draft)
+            .ok()
+            .and_then(|j| j["id"].as_str().map(str::to_string))
+            .ok_or_else(|| crate::errors::OmarchyError::HttpError("Graph did not return a draft id".into()))?;
+        let did = urlencoding::encode(&draft_id).into_owned();
+
+        let finish = async {
+            call(reqwest::Method::PATCH, format!("/me/messages/{}", did), Some(graph_message_json(msg))).await?;
+            call(reqwest::Method::POST, format!("/me/messages/{}/send", did), None).await
+        };
+        match finish.await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // Do not leave a stray draft behind.
+                if let Err(d) = call(reqwest::Method::DELETE, format!("/me/messages/{}", did), None).await {
+                    warn!("Graph: could not delete draft {} after a failed send: {}", draft_id, d);
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Fetch all mail folders from Graph API

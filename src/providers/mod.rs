@@ -42,6 +42,13 @@ pub trait EmailProvider: Send + Sync {
         Err(crate::errors::OmarchyError::HttpError("set_message_read not supported".into()))
     }
 
+    /// Send a composed message. `from` is the account's own address (providers that sign the
+    /// From line themselves may ignore it). Err(transient) failures are retried by the outbox
+    /// (see `compose::is_transient`); everything else is reported to the user.
+    async fn send_message(&self, _msg: &crate::compose::OutgoingMessage, _from: &str) -> Result<()> {
+        Err(crate::errors::OmarchyError::HttpError("send_message not supported".into()))
+    }
+
     /// True when the provider can report changes since a stored link (Graph delta), so the
     /// daemon syncs by change feed instead of re-reading whole folders.
     fn supports_delta(&self) -> bool {

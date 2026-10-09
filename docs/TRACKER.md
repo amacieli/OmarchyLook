@@ -42,7 +42,7 @@ IDs are stable (never reused). Status: `open` | `investigating` | `planned` | `i
 
 | Plan | File | Status |
 |---|---|---|
-| Compose: system-font / HTML modes, drafts, send | `docs/PLAN-compose.md` | planned; Phase D spike passed 2026-10-07 |
+| Compose: system-font / HTML modes, drafts, send | `docs/PLAN-compose.md` | planned; Phase D spike passed 2026-10-07; UI first draft + Phase A (send, outbox, undo delay) built 2026-10-08 |
 | Mail list views / field chooser | `notes/PLAN-mail-list-views.md` (gitignored `notes/`) | not started |
 
 ## Done

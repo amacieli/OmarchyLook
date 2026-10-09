@@ -1,6 +1,6 @@
 //! Per-account sync scheduler.
 //!
-//! Each running account gets one mail, one calendar and one contacts thread, each with
+//! Each running account gets one mail, one calendar, one contacts and one outbox thread, each with
 //! its own current-thread tokio runtime (the daemons use blocking HTTP/SQLite
 //! calls, so a stall in one account can't delay another). Both threads of an
 //! account share that account's `TokenBroker`, hence one token refresh at a
@@ -13,6 +13,7 @@ use crate::calendar_daemon::{CalendarDaemon, CalendarDaemonConfig};
 use crate::contacts_daemon::{ContactsDaemon, ContactsDaemonConfig};
 use crate::db::Database;
 use crate::email_daemon::{DaemonConfig, EmailDaemon};
+use crate::outbox::OutboxWorker;
 use crate::providers::{
     CalendarProvider, ContactsProvider, EmailProvider, GmailProvider, GoogleCalendarProvider, GoogleContactsProvider,
     GraphCalendarProvider, GraphContactsProvider, GraphEmailProvider,
@@ -149,7 +150,20 @@ impl SyncScheduler {
             ContactsDaemon::new(ContactsDaemonConfig::default(), db, provider).start().await;
         });
 
-        running.insert(account_id.to_string(), vec![mail_stop, cal_stop, contacts_stop]);
+        // Sends what the user queued with Send, the moment it is due: its own thread, so a slow
+        // mail sync can never hold a message back.
+        let outbox_stop = Arc::new(Notify::new());
+        let (id, path, kind) = (account_id.to_string(), self.db_str(), provider.clone());
+        spawn_sync_thread(format!("outbox-{}", account_id), outbox_stop.clone(), move || async move {
+            let provider = email_provider(&kind, &id, &path);
+            let db = match Database::open_for_account(&path, &id) {
+                Ok(db) => Arc::new(db),
+                Err(e) => return error!("Outbox {}: cannot open database: {}", id, e),
+            };
+            OutboxWorker::new(&id, db, provider).run().await;
+        });
+
+        running.insert(account_id.to_string(), vec![mail_stop, cal_stop, contacts_stop, outbox_stop]);
         info!("Scheduler: started sync for account {}", account_id);
         true
     }

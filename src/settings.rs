@@ -1,7 +1,7 @@
 //! Settings manager with TOML config and file watching
 
 use crate::errors::{OmarchyError, Result};
-use crate::models::{CalendarSettings, Settings};
+use crate::models::{CalendarSettings, MailSettings, Settings};
 use log::{debug, info, warn};
 use std::path::{Path, PathBuf};
 use std::fs;
@@ -162,6 +162,31 @@ pub fn read_poll_interval(path: &Path) -> u64 {
         .and_then(|v| v.get("sync")?.get("poll_interval_secs")?.as_integer())
         .map(|n| (n.max(0) as u64).clamp(MIN_POLL_SECS, MAX_POLL_SECS))
         .unwrap_or(DEFAULT_POLL_SECS)
+}
+
+/// Seconds a sent message waits before it goes out (`[mail] send_delay_secs`): the default (3)
+/// when the file is missing, unreadable or has no usable value, otherwise clamped to 0..=60.
+/// Read on every send, so a change applies to the next message without a restart.
+pub fn read_send_delay(path: &Path) -> u64 {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+        .and_then(|v| v.get("mail")?.get("send_delay_secs")?.as_integer())
+        .map(|n| n.clamp(0, MailSettings::MAX_SEND_DELAY_SECS as i64) as u64)
+        .unwrap_or(MailSettings::DEFAULT_SEND_DELAY_SECS as u64)
+}
+
+/// Persist the send delay (clamped) into settings.toml, leaving every other setting as it
+/// was. Refuses to touch a file that does not parse. Returns what was stored.
+pub fn write_send_delay(path: &Path, secs: i32) -> Result<u64> {
+    let mut settings: Settings = match fs::read_to_string(path) {
+        Ok(content) => toml::from_str(&content).map_err(|e| OmarchyError::SettingsError(e.to_string()))?,
+        Err(_) => Settings::default(),
+    };
+    settings.mail = MailSettings { send_delay_secs: secs }.sanitized();
+    let content = toml::to_string_pretty(&settings).map_err(|e| OmarchyError::SettingsError(e.to_string()))?;
+    fs::write(path, content)?;
+    Ok(settings.mail.send_delay_secs as u64)
 }
 
 /// Persist calendar settings (clamped) into settings.toml, leaving every other setting as it
@@ -327,3 +352,64 @@ mod poll_interval_tests {
     }
 }
 
+
+#[cfg(test)]
+mod send_delay_tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("omarchylook-senddelay-{}-{}.toml", name, std::process::id()));
+        let _ = fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn defaults_to_three_seconds() {
+        assert_eq!(read_send_delay(&temp("missing")), 3);
+        assert_eq!(Settings::default().mail.send_delay_secs, 3);
+        let p = temp("nosec");
+        fs::write(&p, "[ui]\nwindow_width = 1\n").unwrap();
+        assert_eq!(read_send_delay(&p), 3);
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn zero_is_honoured_and_values_are_clamped() {
+        let p = temp("vals");
+        fs::write(&p, "[mail]\nsend_delay_secs = 0\n").unwrap();
+        assert_eq!(read_send_delay(&p), 0, "0 means send at once, not 'use the default'");
+        fs::write(&p, "[mail]\nsend_delay_secs = -4\n").unwrap();
+        assert_eq!(read_send_delay(&p), 0);
+        fs::write(&p, "[mail]\nsend_delay_secs = 9999\n").unwrap();
+        assert_eq!(read_send_delay(&p), 60);
+        fs::write(&p, "not toml [").unwrap();
+        assert_eq!(read_send_delay(&p), 3);
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn write_round_trips_and_preserves_other_settings() {
+        let p = temp("write");
+        let mut base = Settings::default();
+        base.ui.sidebar_expanded = false;
+        fs::write(&p, toml::to_string_pretty(&base).unwrap()).unwrap();
+        assert_eq!(write_send_delay(&p, 10).unwrap(), 10);
+        assert_eq!(read_send_delay(&p), 10);
+        assert_eq!(write_send_delay(&p, 500).unwrap(), 60);
+        let back: Settings = toml::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        assert!(!back.ui.sidebar_expanded, "other settings untouched");
+        // a file from before this section existed still loads
+        let old: String = fs::read_to_string(&p).unwrap().split("[mail]").next().unwrap().to_string();
+        assert!(toml::from_str::<Settings>(&old).is_ok());
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn an_unparseable_file_is_not_overwritten() {
+        let p = temp("broken");
+        fs::write(&p, "this is = not [valid toml").unwrap();
+        assert!(write_send_delay(&p, 5).is_err());
+        assert_eq!(fs::read_to_string(&p).unwrap(), "this is = not [valid toml");
+        let _ = fs::remove_file(&p);
+    }
+}

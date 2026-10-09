@@ -41,7 +41,17 @@ FocusScope {
     onMoveRequested: function(dx, dy) { appState.moveCursor(dx, dy) }
     onActivateRequested: appState.activate()
     onCloseRequested: appState.back()
-    onTextKey: function(t) { if (t === "s") appState.cycleFocus() }
+    onTextKey: function(t) {
+      if (t === "s") appState.cycleFocus()
+      else if (appState.currentView === "mail" && !appState.composing) {
+        if (t === "c") appState.openCompose("new")
+        else if (t === "r") appState.openCompose("reply")
+        else if (t === "a") appState.openCompose("replyAll")
+        else if (t === "f") appState.openCompose("forward")
+      }
+      // `u` takes back the message that is still inside its send delay.
+      if (t === "u" && !appState.composing) appState.undoLatest()
+    }
 
     // PageUp/PageDown move the cursor a screenful in the pane that has it. Qt's
     // `Keys` has no page-key signal, so these are Shortcuts, switched off while a
@@ -57,6 +67,7 @@ FocusScope {
       }
     }
 
+    Shortcut { sequences: ["Ctrl+N"]; enabled: appState.currentView === "mail" && !appState.composing; onActivated: appState.openCompose("new") }
     Shortcut { sequences: ["PgUp"];   enabled: !keyCatcher.blocked; onActivated: keyCatcher.page(-1) }
     Shortcut { sequences: ["PgDown"]; enabled: !keyCatcher.blocked; onActivated: keyCatcher.page(1) }
 
@@ -165,6 +176,15 @@ FocusScope {
 
   AuthModal {
     anchors.fill: parent
+  SendToast {
+    app: appState
+    anchors.right: parent.right
+    anchors.bottom: parent.bottom
+    anchors.rightMargin: Style.spacing.huge
+    anchors.bottomMargin: Style.space(40)      // clear of the bottom status bar
+    z: 900
+  }
+
     auth: appState.auth
     z: 1000
   }

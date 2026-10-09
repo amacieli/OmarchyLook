@@ -23,6 +23,8 @@ pub mod perf;
 pub mod sync_state;
 pub mod qt_bridge;
 pub mod email_daemon;
+pub mod compose;
+pub mod outbox;
 pub mod calendar_daemon;
 pub mod contacts_daemon;
 pub mod providers;

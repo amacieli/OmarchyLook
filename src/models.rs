@@ -218,6 +218,32 @@ pub struct Settings {
     /// Absent in settings files written before this section existed.
     #[serde(default)]
     pub calendar: CalendarSettings,
+    /// Absent in settings files written before this section existed.
+    #[serde(default)]
+    pub mail: MailSettings,
+}
+
+/// Mail behaviour settings (`[mail]` in settings.toml).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct MailSettings {
+    /// Seconds a sent message waits (during which it can still be taken back) before it goes
+    /// out. 0 = send at once. Default 3, at most `MAX_SEND_DELAY_SECS`.
+    #[serde(default = "MailSettings::default_send_delay")]
+    pub send_delay_secs: i32,
+}
+
+impl MailSettings {
+    pub const DEFAULT_SEND_DELAY_SECS: i32 = 3;
+    pub const MAX_SEND_DELAY_SECS: i32 = 60;
+    fn default_send_delay() -> i32 { Self::DEFAULT_SEND_DELAY_SECS }
+
+    pub fn sanitized(&self) -> Self {
+        Self { send_delay_secs: self.send_delay_secs.clamp(0, Self::MAX_SEND_DELAY_SECS) }
+    }
+}
+
+impl Default for MailSettings {
+    fn default() -> Self { Self { send_delay_secs: Self::DEFAULT_SEND_DELAY_SECS } }
 }
 
 /// How far recurring meetings are expanded into individual occurrences, in whole years
@@ -340,6 +366,7 @@ impl Default for Settings {
                 cache_retention_days: 30,
             },
             calendar: CalendarSettings::default(),
+            mail: MailSettings::default(),
         }
     }
 }

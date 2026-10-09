@@ -4,8 +4,8 @@ import qs.Ui
 import "../../common"
 import ".."
 
-// Only "Message rendering" is wired to the backend (settings.toml); the other values
-// are placeholders and are not persisted.
+// "Message rendering" and "Delay sending email" are wired to the backend (settings.toml); the
+// other values are placeholders and are not persisted.
 SettingsPage {
   id: page
 
@@ -15,7 +15,7 @@ SettingsPage {
   property int markReadDelay: 2
   property bool conversationView: true
 
-  editing: signature.activeFocus || syncDropdown.popupOpen || delay.field.activeFocus || renderingDropdown.popupOpen
+  editing: signature.activeFocus || syncDropdown.popupOpen || delay.field.activeFocus || renderingDropdown.popupOpen || sendDelay.field.activeFocus
 
   title: "Mail"
   description: "Sync behaviour and reading preferences."
@@ -89,6 +89,32 @@ SettingsPage {
     to: 60
     onModified: function(v) { page.markReadDelay = v }
   }
+
+  Column {
+    width: parent.width
+    spacing: Style.space(6)
+
+    PanelSectionHeader { text: "SENDING" }
+    NumberField {
+      id: sendDelay
+      label: "Delay sending email for (seconds)"
+      value: page.app ? page.app.sendDelaySecs : 3
+      from: 0
+      to: page.app ? page.app.maxSendDelaySecs : 60
+      onModified: function(v) { if (page.app) page.app.setSendDelay(v) }
+    }
+    UiText {
+      width: parent.width
+      text: sendDelay.value === 0
+        ? "Messages are sent the moment you press Send."
+        : "After Send, a message waits this long so you can take it back (Undo, or u) and keep drafting. Set to 0 to send at once."
+      dim: true
+      wrapMode: Text.WordWrap
+      font.pixelSize: Style.font.caption
+    }
+  }
+
+  PanelSeparator { width: parent.width }
 
   Column {
     width: parent.width

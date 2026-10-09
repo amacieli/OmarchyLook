@@ -13,6 +13,7 @@ Item {
   property var message: null
 
   signal replyRequested()
+  signal replyAllRequested()
   signal forwardRequested()
   signal toggleReadRequested()
   signal toggleHtmlRequested()
@@ -155,6 +156,12 @@ Item {
         iconText: "\uf112"
         bordered: true
         onClicked: root.replyRequested()
+      }
+      Button {
+        text: "reply all"
+        iconText: "\uf122"
+        bordered: true
+        onClicked: root.replyAllRequested()
       }
       Button {
         text: "forward"

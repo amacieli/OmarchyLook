@@ -91,6 +91,7 @@ impl EmailDaemon {
         let mut authenticated_once = false;
 
         let acct = self.db.account_id().to_string();
+        let mut seen_push = sync_state::read_push_serial();
         perf::mark(&format!("mail[{}] daemon started", acct));
         loop {
             // Re-read each cycle so a change in settings.toml applies without a restart.
@@ -157,8 +158,24 @@ impl EmailDaemon {
                     // Safety net: whatever happened above, never hold calendar/contacts back.
                     sync_state::open_gate(&acct);
 
-                    // After a successful sync, sleep for the normal poll interval
-                    tokio::time::sleep(message_interval).await;
+                    // After a successful sync, wait out the poll interval. A read/unread click
+                    // wakes this early and is pushed to the provider straight away.
+                    let deadline = tokio::time::Instant::now() + message_interval;
+                    loop {
+                        let wake = sync_state::read_push_requested();
+                        tokio::pin!(wake);
+                        // Registered before the serial check, so a click cannot slip between them.
+                        let _ = wake.as_mut().enable();
+                        let now_push = sync_state::read_push_serial();
+                        if now_push != seen_push {
+                            seen_push = now_push;
+                            self.push_pending_reads().await;
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep_until(deadline) => break,
+                            _ = &mut wake => {}
+                        }
+                    }
                 }
                 Ok(false) => {
                     warn!("Auth token not valid, waiting for authentication...");

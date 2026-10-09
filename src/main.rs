@@ -155,6 +155,18 @@ fn launch_qml_app(config_dir: &PathBuf) {
     // writes auth_state.json / device_code.json.
     omarchylook::perf::mark("spawning quickshell");
     let mut cmd = Command::new("quickshell");
+    // Native QML plugins (OmarchyLook.Compose): the dev build next to the source tree, then the
+    // installed location. Existing QML_IMPORT_PATH entries are kept.
+    {
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(root) = std::path::Path::new(&qml_dir).parent() {
+            paths.push(root.join("plugin/omarchylook-compose/build/qml"));
+        }
+        paths.push(std::path::PathBuf::from("/usr/lib/omarchylook/qml"));
+        let mut joined: Vec<String> = paths.iter().filter(|p| p.exists()).map(|p| p.display().to_string()).collect();
+        if let Ok(existing) = std::env::var("QML_IMPORT_PATH") { if !existing.is_empty() { joined.push(existing); } }
+        if !joined.is_empty() { cmd.env("QML_IMPORT_PATH", joined.join(":")); }
+    }
     cmd.arg("-p").arg(&qml_dir)
         .env("QML_DIR", &qml_dir)
         .env("CONFIG_DIR", config_dir.to_str().unwrap())
@@ -328,6 +340,102 @@ fn message_body_json(config_dir: &PathBuf, id: &str) -> String {
     }
 }
 
+/// Read the body of a POST whose headers (and maybe part of the body) are already in `initial`.
+/// The server's first read is only 1 KiB, which is enough for every route that carries its data
+/// in the query string; the compose route carries a whole message.
+fn read_post_body(stream: &mut std::net::TcpStream, initial: &[u8], limit: usize) -> Result<String, String> {
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+    let mut data = initial.to_vec();
+    let find = |d: &[u8]| d.windows(4).position(|w| w == b"\r\n\r\n");
+    let header_end = loop {
+        if let Some(i) = find(&data) { break i + 4; }
+        if data.len() > 64 * 1024 { return Err("request headers too large".into()); }
+        let mut chunk = [0u8; 4096];
+        let n = stream.read(&mut chunk).map_err(|e| format!("read failed: {}", e))?;
+        if n == 0 { return Err("connection closed before the request was complete".into()); }
+        data.extend_from_slice(&chunk[..n]);
+    };
+    let head = String::from_utf8_lossy(&data[..header_end]).to_ascii_lowercase();
+    let len = head
+        .lines()
+        .find_map(|l| l.strip_prefix("content-length:"))
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .ok_or_else(|| "missing Content-Length".to_string())?;
+    if len > limit { return Err("message too large".into()); }
+    while data.len() < header_end + len {
+        let mut chunk = [0u8; 16 * 1024];
+        let n = stream.read(&mut chunk).map_err(|e| format!("read failed: {}", e))?;
+        if n == 0 { return Err("connection closed before the message was complete".into()); }
+        data.extend_from_slice(&chunk[..n]);
+    }
+    String::from_utf8(data[header_end..header_end + len].to_vec()).map_err(|_| "message is not valid UTF-8".into())
+}
+
+/// POST /compose/send — queue a composed message. The body is the JSON the compose pane builds
+/// (`omarchylook::compose::OutgoingMessage`). It is stored in the outbox to go out after the
+/// `[mail] send_delay_secs` setting (0 = now) and the account's outbox worker is woken, so the
+/// send never waits for a poll. Answers `{ok, id, delay_secs}` or `{ok:false, error}`.
+fn compose_send_response(config_dir: &PathBuf, stream: &mut std::net::TcpStream, initial: &[u8]) -> String {
+    use omarchylook::compose::{OutgoingMessage, MAX_BODY_BYTES};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let err = |m: &str| serde_json::json!({ "ok": false, "error": m }).to_string();
+
+    let raw = match read_post_body(stream, initial, MAX_BODY_BYTES + 64 * 1024) {
+        Ok(b) => b,
+        Err(e) => return err(&e),
+    };
+    let msg: OutgoingMessage = match serde_json::from_str(&raw) {
+        Ok(m) => m,
+        Err(e) => return err(&format!("unreadable message: {}", e)),
+    };
+    if let Err(e) = msg.validate() {
+        return err(&e);
+    }
+    // A signed-out account has no worker, so the message would sit unsent without anyone knowing.
+    if !SCHEDULER.get().map(|s| s.is_running(&msg.account_id)).unwrap_or(false) {
+        return err("that account is not signed in, so it cannot send");
+    }
+    let db = match Database::open(config_dir.join("messages.db").to_str().unwrap_or("messages.db")) {
+        Ok(db) => db,
+        Err(e) => return err(&format!("database: {}", e)),
+    };
+    let delay = omarchylook::settings::read_send_delay(&config_dir.join("settings.toml"));
+    let now = Database::now_ms();
+    let id = format!("ob-{:x}-{:03x}", now, COUNTER.fetch_add(1, Ordering::Relaxed) & 0xfff);
+    let payload = match serde_json::to_string(&msg) {
+        Ok(p) => p,
+        Err(e) => return err(&e.to_string()),
+    };
+    if let Err(e) = db.outbox_enqueue(&id, &msg.account_id, &payload, now + delay as i64 * 1000) {
+        return err(&format!("could not queue the message: {}", e));
+    }
+    omarchylook::sync_state::request_outbox_run();
+    info!("Compose: queued {} ({} → {} recipient(s)), sends in {}s", id, msg.account_id, msg.to.len() + msg.cc.len() + msg.bcc.len(), delay);
+    serde_json::json!({ "ok": true, "id": id, "delay_secs": delay }).to_string()
+}
+
+/// POST /compose/cancel?id=ID and GET /compose/status?id=ID.
+fn compose_outbox_response(config_dir: &PathBuf, first_line: &str) -> String {
+    let err = |m: &str| serde_json::json!({ "ok": false, "error": m }).to_string();
+    let id = match query_param(first_line, "id") { Some(i) => i, None => return err("missing id") };
+    let db = match Database::open(config_dir.join("messages.db").to_str().unwrap_or("messages.db")) {
+        Ok(db) => db,
+        Err(e) => return err(&format!("database: {}", e)),
+    };
+    let cancelling = first_line.contains("POST /compose/cancel");
+    let cancelled = if cancelling {
+        match db.outbox_cancel(&id) { Ok(c) => c, Err(e) => return err(&e.to_string()) }
+    } else { false };
+    match db.outbox_status(&id) {
+        Ok(Some((state, error, attempts))) => serde_json::json!({
+            "ok": true, "cancelled": cancelled, "state": state, "error": error, "attempts": attempts
+        }).to_string(),
+        Ok(None) => serde_json::json!({ "ok": false, "cancelled": false, "state": "unknown", "error": "no such message" }).to_string(),
+        Err(e) => err(&e.to_string()),
+    }
+}
+
 /// JSON body for the /settings/senders endpoints (see the route comment).
 fn sender_prefs_response(config_dir: &PathBuf, first_line: &str) -> String {
     use omarchylook::db::SenderAdd;
@@ -369,8 +477,11 @@ fn sender_prefs_response(config_dir: &PathBuf, first_line: &str) -> String {
 ///   POST /auth/login   → triggers device flow
 ///   POST /auth/logout  → triggers logout
 fn start_http_trigger_server(config_dir: &PathBuf) {
-    eprintln!("[HTTP] Attempting to bind 127.0.0.1:27182");
-    let listener = match TcpListener::bind("127.0.0.1:27182") {
+    // OMARCHYLOOK_PORT is for tests that run a second instance beside the real one; the UI always
+    // talks to the default port.
+    let addr = format!("127.0.0.1:{}", env::var("OMARCHYLOOK_PORT").ok().and_then(|p| p.parse::<u16>().ok()).unwrap_or(27182));
+    eprintln!("[HTTP] Attempting to bind {}", addr);
+    let listener = match TcpListener::bind(&addr) {
         Ok(l) => {
             eprintln!("[HTTP] ✅ Bound OK");
             info!("🌐 HTTP trigger server listening on http://127.0.0.1:27182");
@@ -526,8 +637,55 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     let ok = !id.is_empty()
                         && Database::open(config_dir.join("messages.db").to_str().unwrap_or("messages.db"))
                             .and_then(|db| db.set_message_read(&id, read))
+                            .map(|changed| if changed { omarchylook::sync_state::request_read_push() })
                             .is_ok();
                     let body = if ok { "ok" } else { "error" };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── POST /compose/send (JSON body) — queue a message; POST /compose/cancel?id= —
+                // take it back while it is still inside its delay; GET /compose/status?id= ──
+                if first_line.contains("POST /compose/send") {
+                    let body = compose_send_response(config_dir, &mut stream, &buf[..n]);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+                if first_line.contains("POST /compose/cancel") || first_line.contains("GET /compose/status") {
+                    let body = compose_outbox_response(config_dir, first_line);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── GET|POST /settings/mail?send_delay=N — seconds a sent message waits before it goes ──
+                if first_line.contains("GET /settings/mail") || first_line.contains("POST /settings/mail") {
+                    use omarchylook::models::MailSettings;
+                    let settings_path = config_dir.join("settings.toml");
+                    let mut secs = omarchylook::settings::read_send_delay(&settings_path);
+                    if first_line.contains("POST /settings/mail") {
+                        if let Some(wanted) = query_param(first_line, "send_delay").and_then(|v| v.parse::<i32>().ok()) {
+                            match omarchylook::settings::write_send_delay(&settings_path, wanted) {
+                                Ok(stored) => secs = stored,
+                                Err(e) => warn!("POST /settings/mail: could not save: {}", e),
+                            }
+                        }
+                    }
+                    let body = serde_json::json!({
+                        "send_delay_secs": secs,
+                        "max_send_delay_secs": MailSettings::MAX_SEND_DELAY_SECS,
+                    }).to_string();
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                         body.len(), body

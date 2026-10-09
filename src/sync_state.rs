@@ -15,6 +15,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 static MAIL_SERIAL: AtomicU64 = AtomicU64::new(0);
+static READ_PUSH_SERIAL: AtomicU64 = AtomicU64::new(0);
+static READ_PUSH: tokio::sync::Notify = tokio::sync::Notify::const_new();
+static OUTBOX_SERIAL: AtomicU64 = AtomicU64::new(0);
+static OUTBOX: tokio::sync::Notify = tokio::sync::Notify::const_new();
 static GATE: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 pub fn mail_serial() -> u64 {
@@ -51,4 +55,51 @@ pub async fn wait_gate(account: &str, max: Duration) -> bool {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     true
+}
+
+/// A read/unread change was just stored locally: wake the mail daemons so they push it to the
+/// provider now instead of at the next poll.
+pub fn request_read_push() {
+    READ_PUSH_SERIAL.fetch_add(1, Ordering::SeqCst);
+    READ_PUSH.notify_waiters();
+}
+
+pub fn read_push_serial() -> u64 {
+    READ_PUSH_SERIAL.load(Ordering::SeqCst)
+}
+
+/// Resolves on the next `request_read_push()`. Callers compare `read_push_serial()` to catch
+/// requests made while they were not waiting.
+pub fn read_push_requested() -> tokio::sync::futures::Notified<'static> {
+    READ_PUSH.notified()
+}
+
+/// A message was queued (or its timing changed): wake the outbox workers so they send it the
+/// moment it is due instead of at the next poll.
+pub fn request_outbox_run() {
+    OUTBOX_SERIAL.fetch_add(1, Ordering::SeqCst);
+    OUTBOX.notify_waiters();
+}
+
+/// Resolves on the next `request_outbox_run()`.
+pub fn outbox_requested() -> tokio::sync::futures::Notified<'static> {
+    OUTBOX.notified()
+}
+
+#[cfg(test)]
+mod read_push_tests {
+    use super::*;
+
+    #[test]
+    fn request_read_push_wakes_a_waiting_daemon_and_bumps_the_serial() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let before = read_push_serial();
+            let mut wake = Box::pin(read_push_requested());
+            let _ = wake.as_mut().enable();
+            request_read_push();
+            tokio::time::timeout(Duration::from_secs(1), wake).await.expect("waiter was not woken");
+            assert!(read_push_serial() > before);
+        });
+    }
 }

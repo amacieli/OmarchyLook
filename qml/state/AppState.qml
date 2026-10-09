@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import "../mail/format.js" as Fmt
 
 // All non-visual state: navigation + focus model, folder/message data, and the
 // backend (Rust daemon, local HTTP) calls. Components read properties and call
@@ -15,7 +16,7 @@ Item {
   }
   property bool backendOnline: false
   onBackendOnlineChanged: {
-    if (backendOnline) { perfMark("backend first answered"); loadCalendarSettings(); loadUiSettings(); loadSenders() }
+    if (backendOnline) { perfMark("backend first answered"); loadCalendarSettings(); loadUiSettings(); loadSenders(); loadMailSettings() }
   }
 
   // ---- launch timing (see src/perf.rs): marks are queued until the backend answers, then
@@ -438,6 +439,226 @@ Item {
 
   // Mark the message at `index` read/unread (default: the one under the cursor).
   // Optimistic: the row, the reading pane and the folder count change at once; the
+  // ---- compose ---------------------------------------------------------------------------
+  // The compose pane takes the reading pane's slot while `composing`. This is state + intents
+  // only; sending is not wired to the backend yet (PLAN-compose.md Phase A), so submitCompose
+  // reports that instead of pretending.
+  property bool composing: false
+  property var composeInitial: ({ kind: "new" })
+  property string composeStatus: ""
+  property string composeDefaultMode: "system"   // [mail.compose] default_format, once settings carry it
+  property var composeContacts: []               // [{ name, email }] for recipient suggestions
+
+  function loadComposeContacts() {
+    request("GET", "/contacts?view=all", function(xhr) {
+      if (xhr.status !== 200) return
+      try {
+        var list = JSON.parse(xhr.responseText), out = []
+        for (var i = 0; i < list.length; i++)
+          for (var j = 0; j < (list[i].emails || []).length; j++)
+            out.push({ name: list[i].display_name || "", email: list[i].emails[j] })
+        root.composeContacts = out
+      } catch (e) { console.log("[Compose] contacts parse error:", e) }
+    })
+  }
+
+  function _addr(m) {
+    var e = m && m.from_email ? String(m.from_email) : ""
+    var n = m && m.from_name ? String(m.from_name) : ""
+    return n !== "" && e !== "" ? n + " <" + e + ">" : e
+  }
+
+  // kind: "new" | "reply" | "replyAll" | "forward". Default source: the message under the cursor.
+  function openCompose(kind) {
+    var m = currentMessage
+    var init = { kind: kind, accountId: "", to: "", cc: "", bcc: "", subject: "", quote: null, inReplyTo: "" }
+    var acct = accounts.filter(function(a) { return a.signed_in && a.email })
+    if (acct.length > 0) init.accountId = acct[0].id
+    if (kind !== "new" && m) {
+      if (m.account_id) init.accountId = String(m.account_id)
+      var subj = String(m.subject || "")
+      var plain = currentBody && currentBody.state === "ready"
+        ? (currentBody.type === "html" ? Fmt.htmlToText(currentBody.content) : currentBody.content)
+        : String(m.body_preview || "")
+      init.quote = { from: _addr(m), date: Fmt.fullDate(m.received_at), text: plain }
+      init.inReplyTo = String(m.id || "")
+      if (kind === "forward") {
+        init.subject = /^fw(d)?:/i.test(subj) ? subj : "Fwd: " + subj
+      } else {
+        init.subject = /^re:/i.test(subj) ? subj : "Re: " + subj
+        init.to = _addr(m)
+        // Reply-all keeps the original To list; the backend phase will drop our own address.
+        if (kind === "replyAll") init.cc = String(m.to_recipients || m.to || "")
+      }
+    }
+    composeStatus = ""
+    composeInitial = init
+    composing = true
+    if (composeContacts.length === 0) loadComposeContacts()
+  }
+
+  function closeCompose() { composing = false; composeStatus = ""; focusRequested() }
+
+  // ---- sending ---------------------------------------------------------------------------
+  // Send hands the message to the backend's outbox, which holds it for `sendDelaySecs` (Settings
+  // -> Mail) so it can still be taken back, then sends it at once from its own worker. The
+  // compose pane closes straight away; SendToast shows each message's progress and offers Undo.
+  property int sendDelaySecs: 3
+  property int maxSendDelaySecs: 60
+
+  function applyMailSettings(d) {
+    if (d.send_delay_secs !== undefined) sendDelaySecs = d.send_delay_secs
+    if (d.max_send_delay_secs) maxSendDelaySecs = d.max_send_delay_secs
+  }
+
+  function loadMailSettings() {
+    request("GET", "/settings/mail", function(xhr) {
+      if (xhr.status !== 200) return
+      try { applyMailSettings(JSON.parse(xhr.responseText)) } catch (e) { console.log("[MailSettings] parse error:", e) }
+    })
+  }
+
+  // Called on every stepper change; the save is debounced so rapid clicks send one request.
+  function setSendDelay(secs) {
+    sendDelaySecs = secs
+    mailSettingsSave.restart()
+  }
+
+  Timer {
+    id: mailSettingsSave
+    interval: 600
+    onTriggered: root.request("POST", "/settings/mail?send_delay=" + root.sendDelaySecs, function(xhr) {
+      if (xhr.status !== 200) return
+      try { root.applyMailSettings(JSON.parse(xhr.responseText)) } catch (e) {}   // the backend clamps
+    })
+  }
+
+  // Messages handed to the backend and not yet dismissed:
+  // [{ id, message, sendAt (ms), state: pending|sending|sent|failed, error, doneAt }]
+  property var sends: []
+  property real sendNow: Date.now()      // ticks while anything is in flight, for the countdown
+  readonly property bool sending: sends.length > 0
+
+  function _sendIndex(id) {
+    for (var i = 0; i < sends.length; i++) if (sends[i].id === id) return i
+    return -1
+  }
+
+  function _patchSend(id, patch) {
+    var i = _sendIndex(id)
+    if (i < 0) return
+    var next = sends.slice(), cur = next[i], merged = {}
+    for (var k in cur) merged[k] = cur[k]
+    for (var p in patch) merged[p] = patch[p]
+    next[i] = merged
+    sends = next
+  }
+
+  function dismissSend(id) { sends = sends.filter(function(s) { return s.id !== id }) }
+
+  function submitCompose(message) {
+    composeStatus = "sending…"
+    request("POST", "/compose/send", function(xhr) {
+      var r = null
+      try { r = JSON.parse(xhr.responseText) } catch (e) {}
+      if (xhr.status !== 200 || !r || !r.ok) {
+        // Stay in the editor: nothing was queued, nothing is lost.
+        composeStatus = r && r.error ? String(r.error) : "Could not queue the message (is the backend running?)"
+        return
+      }
+      sendNow = Date.now()
+      sends = sends.concat([{
+        id: r.id, message: message, sendAt: sendNow + r.delay_secs * 1000, delaySecs: r.delay_secs,
+        state: r.delay_secs > 0 ? "pending" : "sending", error: "", doneAt: 0, polling: false
+      }])
+      closeCompose()
+    }, JSON.stringify(message))
+  }
+
+  function _pollSend(id) {
+    var i = _sendIndex(id)
+    if (i < 0 || sends[i].polling) return
+    _patchSend(id, { polling: true })
+    request("GET", "/compose/status?id=" + encodeURIComponent(id), function(xhr) {
+      var r = null
+      try { r = JSON.parse(xhr.responseText) } catch (e) {}
+      if (_sendIndex(id) < 0) return
+      if (!r || !r.state) { _patchSend(id, { polling: false }); return }
+      if (r.state === "sent") _patchSend(id, { state: "sent", doneAt: Date.now(), polling: false })
+      else if (r.state === "failed") _patchSend(id, { state: "failed", error: String(r.error || "The message could not be sent."), polling: false })
+      else if (r.state === "cancelled") dismissSend(id)
+      else _patchSend(id, { state: Date.now() >= sends[_sendIndex(id)].sendAt ? "sending" : "pending", polling: false })
+    })
+  }
+
+  Timer {
+    id: sendTick
+    interval: 250
+    repeat: true
+    running: root.sends.length > 0
+    onTriggered: {
+      root.sendNow = Date.now()
+      var keep = [], changed = false
+      for (var i = 0; i < root.sends.length; i++) {
+        var s = root.sends[i]
+        if (s.state === "sent" && root.sendNow - s.doneAt > 2500) { changed = true; continue }   // fade out
+        keep.push(s)
+        // Once the delay is over, ask how it went (about once a second).
+        if ((s.state === "pending" || s.state === "sending") && root.sendNow >= s.sendAt - 100
+            && Math.floor(root.sendNow / 1000) !== Math.floor((root.sendNow - 250) / 1000))
+          root._pollSend(s.id)
+      }
+      if (changed) root.sends = keep
+    }
+  }
+
+  // Take a queued message back and return to drafting. Only works while it is still waiting;
+  // once the worker has started sending it is too late, and the toast says so.
+  function undoSend(id) {
+    if (composing) return          // one compose at a time: finish or discard the open one first
+    var i = _sendIndex(id)
+    if (i < 0) return
+    var msg = sends[i].message
+    request("POST", "/compose/cancel?id=" + encodeURIComponent(id), function(xhr) {
+      var r = null
+      try { r = JSON.parse(xhr.responseText) } catch (e) {}
+      if (r && r.cancelled) { dismissSend(id); reopenCompose(msg) }
+      else _patchSend(id, { state: r && r.state === "sent" ? "sent" : "sending", doneAt: Date.now() })
+    })
+  }
+
+  function reopenFailedSend(id) {
+    if (composing) return
+    var i = _sendIndex(id)
+    if (i < 0) return
+    var msg = sends[i].message
+    dismissSend(id)
+    reopenCompose(msg)
+  }
+
+  function _addrText(list) {
+    return (list || []).map(function(a) { return a.name ? a.name + " <" + a.email + ">" : a.email }).join(", ")
+  }
+
+  // Back into the editor exactly as it was sent: recipients, subject, body and mode.
+  function reopenCompose(m) {
+    composeStatus = ""
+    composeInitial = {
+      kind: m.kind, accountId: m.account_id, inReplyTo: m.in_reply_to || "",
+      to: _addrText(m.to), cc: _addrText(m.cc), bcc: _addrText(m.bcc),
+      subject: m.subject, quote: null, restore: m.body, mode: m.mode
+    }
+    composing = true
+    if (composeContacts.length === 0) loadComposeContacts()
+  }
+
+  // The newest message still inside its delay (what `u` takes back).
+  function undoLatest() {
+    for (var i = sends.length - 1; i >= 0; i--)
+      if (sends[i].state === "pending") { undoSend(sends[i].id); return true }
+    return false
+  }
+
   // backend stores it and the daemon pushes it to the provider. A refused request
   // puts everything back.
   function toggleRead(index) {

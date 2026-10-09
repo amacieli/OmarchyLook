@@ -66,7 +66,14 @@ colour. Tested with golden files.
 
 ## 4. Phases
 
-### Phase A — Backend send path (no UI), Graph first
+### Phase A — Backend send path, Graph and Gmail — DONE 2026-10-08 (live send to self still to be run by hand)
+Built: `src/compose.rs` (model, validation, HTML clean-up, Graph JSON, Gmail MIME, retry policy), `outbox` table +
+`src/outbox.rs` (one worker thread per account, woken at once by `sync_state::request_outbox_run`), `send_message` on
+both providers, routes `POST /compose/send`, `POST /compose/cancel`, `GET /compose/status`, `GET|POST /settings/mail`,
+setting `[mail] send_delay_secs` (default 3, 0 = immediately, max 60), Settings > Mail field, `SendToast.qml` (Undo / `u`).
+Part of Phase B was pulled in (outbox, undo window, retry/no-retry rules, crash handling); drafts, attachments and
+`compose_html` golden tests are still open. `OMARCHYLOOK_PORT` runs a second backend beside the real one for tests.
+
 - [ ] `models.rs`: `OutgoingMessage { account_id, to, cc, bcc, subject, body: Body{Text|Html}, attachments, in_reply_to: Option<id>, kind: New|Reply|ReplyAll|Forward }`.
 - [ ] `providers/mod.rs`: add `send_message`, `create_draft`, `update_draft`, `delete_draft` with default
       "not supported" bodies (same pattern as `set_message_read`).

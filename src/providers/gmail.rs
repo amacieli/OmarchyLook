@@ -268,6 +268,38 @@ impl super::EmailProvider for GmailProvider {
         self.api.post(&format!("{}/messages/{}/modify", BASE, urlencoding::encode(raw)), &body).await.map(|_| ())
     }
 
+    async fn send_message(&self, msg: &crate::compose::OutgoingMessage, from: &str) -> Result<()> {
+        use crate::compose::{build_mime, ReplyHeaders};
+        // A reply joins the original's thread: it needs the original's Message-ID / References
+        // (for the headers) and its threadId. A forward starts a new conversation, as Gmail's does.
+        let (mut reply, mut thread_id) = (None::<ReplyHeaders>, None::<String>);
+        if msg.is_reply() {
+            let raw = unscoped(&self.account_id, &msg.in_reply_to);
+            let url = format!(
+                "{}/messages/{}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=References",
+                BASE, urlencoding::encode(raw)
+            );
+            match self.api.get(&url).await {
+                Ok(m) => {
+                    reply = Some(ReplyHeaders {
+                        message_id: header(&m, "Message-ID").unwrap_or_default().trim().to_string(),
+                        references: header(&m, "References").unwrap_or_default().trim().to_string(),
+                    });
+                    thread_id = m["threadId"].as_str().map(str::to_string);
+                }
+                // The original is gone: send as a new message rather than lose what was written.
+                Err(e) => warn!("Gmail: cannot thread reply to {}: {}", msg.in_reply_to, e),
+            }
+        }
+        let boundary = format!("=_omarchylook_{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        let mime = build_mime(msg, from, reply.as_ref(), &boundary, &chrono::Utc::now().to_rfc2822());
+        let mut body = serde_json::json!({ "raw": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mime.as_bytes()) });
+        if let Some(t) = thread_id {
+            body["threadId"] = serde_json::json!(t);
+        }
+        self.api.post(&format!("{}/messages/send", BASE), &body).await.map(|_| ())
+    }
+
     async fn fetch_folders(&self) -> Result<Vec<MailFolder>> {
         let labels = self.api.get(&format!("{}/labels", BASE)).await?;
         // Counts need one `labels.get` per shown label; fetch them up front.
