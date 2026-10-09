@@ -18,18 +18,38 @@ Item {
   signal closed()
 
   visible: open
-  function show() { input.text = ""; list.currentIndex = 0; open = true; input.forceActiveFocus() }
+  function show(prefill) {
+    input.text = prefill || ""
+    list.currentIndex = 0
+    open = true
+    input.forceActiveFocus()
+    input.cursorPosition = input.text.length
+  }
   function hide() { if (!open) return; open = false; closed() }
 
+  // Typed commands: "goto cal", "folder inb", "q", "sync". A command whose `ex` names
+  // match the first word leads the list; with a space after it and a `pick`, the list
+  // becomes that picker's choices (modules, folders).
   readonly property var entries: {
     var all = Cmd.applicable(commands, scopes)
     var q = input.text
-    return q === "" ? all : all.filter(function(c) { return Cmd.fuzzy(q, c.title + " " + c.id) })
+    if (q === "") return all
+    var p = Cmd.parseEx(q)
+    var ex = p ? Cmd.findEx(commands, p.name) : null
+    if (ex && ex.pick && p.hasSpace) return ex.pick(p.arg)
+    var rest = all.filter(function(c) { return c !== ex && Cmd.fuzzy(q, c.title + " " + c.id) })
+    return ex ? [ex].concat(rest) : rest
   }
 
   function runCurrent() {
     if (list.currentIndex < 0 || list.currentIndex >= entries.length) return
     var c = entries[list.currentIndex]
+    // A picker command chosen without an argument asks for one instead of running.
+    if (c.pick && c.ex && Cmd.parseEx(input.text) && !Cmd.parseEx(input.text).hasSpace) {
+      input.text = c.ex[0] + " "
+      input.cursorPosition = input.text.length
+      return
+    }
     hide()
     c.run()
   }
@@ -59,7 +79,7 @@ Item {
       TextField {
         id: input
         Layout.fillWidth: true
-        placeholderText: "Type a command…"
+        placeholderText: "Type a command, or: goto <view>   folder <name>   sync   q"
         onTextChanged: list.currentIndex = 0
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(e) {

@@ -35,7 +35,8 @@ FocusScope {
     app: appState
     content: contentLoader.item
     folderPageRows: folderBar.pageRows
-    onPaletteRequested: palette.show()
+    onPaletteRequested: function(prefill) { palette.show(prefill) }
+    onHelpRequested: help.show()
     onQuitRequested: root.closeRequested()
   }
 
@@ -43,6 +44,15 @@ FocusScope {
     id: palette
     anchors.fill: parent
     z: 950
+    commands: commands.list
+    scopes: keyCatcher.scopes
+    onClosed: root.focusKeys()
+  }
+
+  HelpOverlay {
+    id: help
+    anchors.fill: parent
+    z: 960
     commands: commands.list
     scopes: keyCatcher.scopes
     onClosed: root.focusKeys()
@@ -58,7 +68,7 @@ FocusScope {
     scopes: [paneScope, appState.currentView + "/" + paneScope, appState.currentView, "global"]
 
     // Hand keys to text inputs / popups while they own focus.
-    blocked: topBar.searchFocused || settingsEditing || appState.auth.showModal || palette.open
+    blocked: topBar.searchFocused || settingsEditing || appState.auth.showModal || palette.open || help.open
 
     // A page (settings fields, the mail view's image dropdown, compose) owns the keyboard.
     readonly property bool settingsEditing: contentLoader.item && contentLoader.item.editing === true
@@ -179,6 +189,17 @@ FocusScope {
         onRemoveRequested: function(accountId) { appState.auth.removeAccount(accountId) }
       }
     }
+  }
+
+  // Pops up after a short pause on a half-typed chord such as `g`.
+  WhichKey {
+    anchors.left: parent.left
+    anchors.bottom: parent.bottom
+    anchors.leftMargin: Style.spacing.huge
+    anchors.bottomMargin: Style.space(40)
+    z: 900
+    pendingText: keyCatcher.pendingText
+    options: keyCatcher.pendingOptions
   }
 
   SendToast {

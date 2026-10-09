@@ -76,7 +76,7 @@ Item {
     }
 
     UiText {
-      text: "  :  commands"
+      text: "  :  commands   ?  help"
       color: Color.accent
       font.pixelSize: Style.font.caption
       font.bold: true

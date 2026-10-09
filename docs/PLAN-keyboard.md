@@ -78,17 +78,17 @@ Outlook IA). Status: **plan only, nothing built.** Decisions settled in §6.
 - [ ] Reader becomes a focus pane (`focusPane = "reader"`): `j/k` scroll, `Space/b` page, `h` back to list.
 - Done when: no behaviour regression (manual matrix in §5), build clean, perf timeline unchanged.
 
-### Phase 2 — Modules, help, discoverability
-- [ ] `g` chords: `gm gc gp gt gs g,` (+ `gg` is top-of-list — resolved by scope: `g` followed by `g` stays navigation).
-- [ ] Which-key popup after a 400 ms pause on a pending prefix (this is also `g?`).
-- [ ] `?` help overlay generated from the registry (never hand-maintained).
-- [ ] Bottom status bar: pane, pending chord, 3-4 context hints.
-- [ ] Per-module `1-4` pane jumps.
+### Phase 2 — Modules, help, discoverability (DONE 2026-10-09)
+- [x] `g` chords: `gm gc gp gt gs g,` (+ `gg` is top-of-list — resolved by scope: `g` followed by `g` stays navigation).
+- [x] Which-key popup after a 400 ms pause on a pending prefix (this is also `g?`).
+- [x] `?` help overlay generated from the registry (never hand-maintained).
+- [x] Bottom status bar: pane, pending chord, 3-4 context hints.
+- [x] Per-module `1-4` pane jumps.
 
-### Phase 3 — Command palette (`:` and `Ctrl-P`)
-- [ ] `qml/keys/Palette.qml`: fuzzy filter over registry titles; shows bound key, greys unavailable commands.
-- [ ] `:` accepts typed commands with args: `:goto calendar`, `:search invoices`, `:sync`, `:settings`, `:compose`, `:q`.
-- [ ] Palette also hosts "Go to folder…" (fuzzy over folders) — high-value, cheap.
+### Phase 3 — Command palette (`:` and `Ctrl-P`) (DONE 2026-10-09; `:search` is a stub until Phase 5)
+- [x] `qml/keys/CommandPalette.qml`: fuzzy filter over registry titles; shows bound key, greys unavailable commands.
+- [x] `:` accepts typed commands with args: `:goto calendar`, `:search invoices`, `:sync`, `:settings`, `:compose`, `:q`.
+- [x] Palette also hosts "Go to folder…" (fuzzy over folders) — high-value, cheap.
 
 ### Phase 4 — Mail object actions (needs backend; ship each key with its endpoint)
 - [ ] Now (no backend work): `e`/`Enter` open, `m`→ renamed per Q1, key for `toggleRead` (`u` is undo-send; propose `Shift-U`

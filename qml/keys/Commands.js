@@ -55,3 +55,40 @@ function fuzzy(query, text) {
 function keyLabel(keys) {
   return keys.map(function(k) { return k.replace(/^C-/, "Ctrl-").replace(/^S-/, "Shift-") }).join("  ")
 }
+
+// ":goto calendar" / "goto calendar" -> { name: "goto", arg: "calendar" }; null when empty.
+function parseEx(text) {
+  var m = /^\s*:?\s*(\S+)(\s+(.*))?$/.exec(text)
+  if (!m) return null
+  return { name: m[1].toLowerCase(), arg: (m[3] || "").trim(), hasSpace: m[2] !== undefined }
+}
+
+// The command (any scope) whose `ex` names include `name`, honouring `when`.
+function findEx(commands, name) {
+  for (var i = 0; i < commands.length; i++) {
+    var c = commands[i]
+    if (!c.ex || (c.when && !c.when())) continue
+    if (c.ex.indexOf(name) >= 0) return c
+  }
+  return null
+}
+
+var sectionNames = {
+  "global": "Everywhere", "nav": "Menu pane", "folder": "Folders pane", "list": "List pane",
+  "reader": "Reading pane", "mail": "Mail", "calendar/list": "Calendar", "contacts/list": "People",
+  "tasks/list": "Tasks", "settings": "Settings", "sms": "SMS"
+}
+function sectionName(scope) { return sectionNames[scope] || scope }
+
+// Every non-hidden command grouped by scope, scopes in `first` (the active ones) leading.
+// Returns [{ scope, name, active, commands }].
+function grouped(commands, first) {
+  var order = first.slice()
+  for (var i = 0; i < commands.length; i++) if (order.indexOf(commands[i].scope) < 0) order.push(commands[i].scope)
+  var out = []
+  for (var s = 0; s < order.length; s++) {
+    var cs = commands.filter(function(c) { return c.scope === order[s] && !c.hidden && c.keys.length > 0 })
+    if (cs.length) out.push({ scope: order[s], name: sectionName(order[s]), active: first.indexOf(order[s]) >= 0, commands: cs })
+  }
+  return out
+}

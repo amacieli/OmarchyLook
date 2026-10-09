@@ -982,6 +982,12 @@ Item {
     setNavIndex(bottom ? navItems.length - 1 : 0)
   }
 
+  // Jump to folder `i` of the folder model and land in its message list.
+  function gotoFolder(i) {
+    gotoView("mail")
+    clickFolder(i)
+  }
+
   // `g` + letter: go to a module and land in its main pane.
   function gotoView(view) {
     for (var i = 0; i < navItems.length; i++) {
