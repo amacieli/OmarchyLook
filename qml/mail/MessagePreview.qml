@@ -10,10 +10,11 @@ import "format.js" as Fmt
 Item {
   id: root
 
-  PaneFrame { focused: root.paneFocused; hotkey: "\u2074"; title: "message" }
+  PaneFrame { focused: root.paneFocused; hotkey: root.hotkey; title: "message" }
 
   property var message: null
   property bool paneFocused: false
+  property string hotkey: "\u2074"
 
   // Keyboard scrolling of the body (the reader pane). Whichever view is showing.
   function _flick() { return htmlScroll.visible ? htmlScroll.contentItem : scroll.contentItem }

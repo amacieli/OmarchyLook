@@ -31,6 +31,9 @@ RowLayout {
     status: root.app.messagesStatus
     currentIndex: root.app.msgIndex
     paneFocused: root.app.focusPane === "msg"
+    marks: root.app.marks
+    frameTitle: root.app.selectedFolderLabel
+    hotkey: root.app.showFolderPane ? "\u00b3" : "\u00b2"
     onRowClicked: function(i) { root.app.clickMessage(i) }
     onEndReached: root.app.loadMoreMessages()
     onRefreshRequested: { root.app.loadMessages(); root.app.focusRequested() }
@@ -78,6 +81,7 @@ RowLayout {
     id: preview
     visible: !root.app.composing
     paneFocused: root.app.focusPane === "reader"
+    hotkey: root.app.showFolderPane ? "\u2074" : "\u00b3"
     Layout.fillWidth: true
     Layout.fillHeight: true
     onReplyRequested: root.app.openCompose("reply")

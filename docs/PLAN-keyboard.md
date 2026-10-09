@@ -90,7 +90,7 @@ Outlook IA). Status: **plan only, nothing built.** Decisions settled in §6.
 - [x] `:` accepts typed commands with args: `:goto calendar`, `:search invoices`, `:sync`, `:settings`, `:compose`, `:q`.
 - [x] Palette also hosts "Go to folder…" (fuzzy over folders) — high-value, cheap.
 
-### Phase 4 — Mail object actions (needs backend; ship each key with its endpoint)
+### Phase 4 — Mail object actions (BUILT 2026-10-09; provider push untested against live mail)
 - [ ] Now (no backend work): `e`/`Enter` open, `m`→ renamed per Q1, key for `toggleRead` (`u` is undo-send; propose `Shift-U`
       or `z`/`Z` read/unread — Q4).
 - [ ] Backend: `POST /messages/{archive,delete,move,flag}` + Graph (`graph.rs`) and Gmail (`gmail.rs`) implementations,
@@ -141,3 +141,17 @@ Outlook IA). Status: **plan only, nothing built.** Decisions settled in §6.
 - Follow-up: other modules get the same keys through a view hook (`keyMove/keyPage/keyEdge/keyActivate/keyDelete`) plus
   per-view commands (Calendar `j/k` period, `t`, `d/w/W/m`; Tasks `j/k`, Space done, `f`; People `j/k` scroll).
 - Still open (minor): Calendar `t` = today vs tag — resolved by context (tag has no backend; categories are README Phase 5).
+
+## 7. Phase 4 as built
+- Keys (message list / reader): `a` archive, `x` delete (to Trash; in Trash/Deleted Items asks, Cancel is the default, then deletes for good),
+  `m` move (picker: same account, not the current folder; also `:move <name>`), `z` read/unread, `u` undo (action first, else unsend).
+  List only: `v` mark + advance, `V` mark range, `*` mark all, Esc clears marks. Actions apply to the marks, else the cursor row.
+- Backend: `POST /messages/action?ids=&op=archive|trash|delete|move[&dest=]`, `POST /messages/action/undo?ids=`. Rows get
+  `action_pending`/`action_due` (hidden from `GET /messages` at once, folder unread counts follow). The undo window is the mail
+  "send delay" setting; the daemon then calls `apply_message_action` (Graph: move to `archive`/`deleteditems`/folder, DELETE;
+  Gmail: INBOX label off / `trash` / label swap; Gmail permanent delete is refused: `gmail.modify` cannot do it). Transient errors
+  retry, refusals put the message back. Local row is deleted after the provider accepts; a moved message arrives via sync.
+- Folder pane is hidden by default (`ui.folder_pane` in settings.toml, `F` / `:folders` toggles). The list title carries the folder
+  and, with several accounts, the account. Pane numbers follow what is on screen.
+- Tests: db `queued_actions_*`, models `message_action_tests`; node `tests/commands.test.js`.
+- Not verified: an actual archive/trash/move/delete reaching Graph or Gmail (only queue + undo were exercised on the live mailbox).

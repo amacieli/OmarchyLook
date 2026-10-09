@@ -268,6 +268,38 @@ impl super::EmailProvider for GmailProvider {
         self.api.post(&format!("{}/messages/{}/modify", BASE, urlencoding::encode(raw)), &body).await.map(|_| ())
     }
 
+    async fn apply_message_action(
+        &self,
+        id: &str,
+        from_folder: &str,
+        action: &crate::models::MessageAction,
+    ) -> Result<()> {
+        use crate::models::MessageAction;
+        let raw = urlencoding::encode(unscoped(&self.account_id, id)).into_owned();
+        match action {
+            // Gmail has no archive folder: archiving is leaving the inbox.
+            MessageAction::Archive => self
+                .api
+                .post(&format!("{}/messages/{}/modify", BASE, raw), &serde_json::json!({"removeLabelIds": ["INBOX"]}))
+                .await
+                .map(|_| ()),
+            MessageAction::Trash => self.api.post(&format!("{}/messages/{}/trash", BASE, raw), &serde_json::json!({})).await.map(|_| ()),
+            // A folder is a label: moving swaps the old label for the new one.
+            MessageAction::Move(dest) => {
+                let mut body = serde_json::json!({"addLabelIds": [unscoped(&self.account_id, dest)]});
+                if !from_folder.is_empty() {
+                    body["removeLabelIds"] = serde_json::json!([unscoped(&self.account_id, from_folder)]);
+                }
+                self.api.post(&format!("{}/messages/{}/modify", BASE, raw), &body).await.map(|_| ())
+            }
+            // gmail.modify cannot delete for good (that needs the full-mail scope); Gmail empties
+            // Trash itself after 30 days.
+            MessageAction::Delete => Err(crate::errors::OmarchyError::HttpError(
+                "Google API error: 403 — permanent delete needs the full-mail scope; Gmail empties Trash after 30 days".into(),
+            )),
+        }
+    }
+
     async fn send_message(&self, msg: &crate::compose::OutgoingMessage, from: &str) -> Result<()> {
         use crate::compose::{build_mime, ReplyHeaders};
         // A reply joins the original's thread: it needs the original's Message-ID / References

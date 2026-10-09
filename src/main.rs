@@ -648,6 +648,56 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     continue;
                 }
 
+                // ── POST /messages/action?ids=a,b&op=archive|trash|delete|move[&dest=FOLDER] —
+                // archive / trash / delete / move messages. The rows are hidden at once; the daemon
+                // tells the provider when the undo window (the mail "send delay") is over.
+                // POST /messages/action/undo?ids=a,b takes them back while that window is open. ──
+                if first_line.contains("POST /messages/action") {
+                    let db_path = config_dir.join("messages.db");
+                    let ids: Vec<String> = query_param(first_line, "ids")
+                        .map(|v| v.split(',').filter(|s| !s.is_empty()).map(String::from).collect())
+                        .unwrap_or_default();
+                    let delay = omarchylook::settings::read_send_delay(&config_dir.join("settings.toml"));
+                    let body = match Database::open(db_path.to_str().unwrap_or("messages.db")) {
+                        Ok(db) if first_line.contains("POST /messages/action/undo") => {
+                            let undone = db.cancel_message_actions(&ids).unwrap_or(0);
+                            if undone > 0 { omarchylook::sync_state::bump_mail("message action undone"); }
+                            serde_json::json!({ "undone": undone }).to_string()
+                        }
+                        Ok(db) => {
+                            use omarchylook::models::MessageAction;
+                            let op = query_param(first_line, "op").unwrap_or_default();
+                            let action = match op.as_str() {
+                                "archive" => Some(MessageAction::Archive),
+                                "trash" => Some(MessageAction::Trash),
+                                "delete" => Some(MessageAction::Delete),
+                                "move" => query_param(first_line, "dest").map(MessageAction::Move),
+                                _ => None,
+                            };
+                            match action {
+                                Some(action) if !ids.is_empty() => {
+                                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+                                    let queued = db.queue_message_actions(&ids, &action, now + delay as i64).unwrap_or(0);
+                                    // Wake the daemons the moment the window closes.
+                                    std::thread::spawn(move || {
+                                        std::thread::sleep(std::time::Duration::from_millis(delay * 1000 + 400));
+                                        omarchylook::sync_state::request_read_push();
+                                    });
+                                    serde_json::json!({ "queued": queued, "delay_secs": delay }).to_string()
+                                }
+                                _ => serde_json::json!({ "error": "bad request: need ids and op (archive|trash|delete|move+dest)" }).to_string(),
+                            }
+                        }
+                        Err(e) => serde_json::json!({ "error": format!("database: {}", e) }).to_string(),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
                 // ── POST /compose/send (JSON body) — queue a message; POST /compose/cancel?id= —
                 // take it back while it is still inside its delay; GET /compose/status?id= ──
                 if first_line.contains("POST /compose/send") {
@@ -876,6 +926,8 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                                 let n = args.len();
                                 conds.push(format!("(m.account_id = ?{n} OR lower(a.email) = lower(?{n}))"));
                             }
+                            // Archived / deleted / moved messages wait out their undo window hidden.
+                            conds.push("m.action_pending IS NULL".to_string());
                             let where_sql = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
                             args.push(limit.into());
                             args.push(offset.into());
@@ -916,13 +968,14 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                         .and_then(|s| toml::from_str::<omarchylook::models::Settings>(&s).ok())
                     {
                         Some(settings) => format!(
-                            "{{\"sidebar_expanded\":{},\"window_width\":{},\"window_height\":{},\"message_rendering\":\"{}\"}}",
+                            "{{\"sidebar_expanded\":{},\"window_width\":{},\"window_height\":{},\"message_rendering\":\"{}\",\"folder_pane\":{}}}",
                             settings.ui.sidebar_expanded,
                             settings.ui.window_width,
                             settings.ui.window_height,
                             omarchylook::settings::normalize_message_rendering(&settings.ui.message_rendering).unwrap_or("system_sender"),
+                            settings.ui.folder_pane,
                         ),
-                        None => "{\"sidebar_expanded\":true,\"window_width\":1280,\"window_height\":800,\"message_rendering\":\"system_sender\"}".to_string(),
+                        None => "{\"sidebar_expanded\":true,\"window_width\":1280,\"window_height\":800,\"message_rendering\":\"system_sender\",\"folder_pane\":false}".to_string(),
                     };
                     let response = format!(
                         "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -1004,6 +1057,25 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     let ok = result.is_some();
                     debug!("POST /settings/sidebar_expanded {} → {}", expanded, ok);
 
+                    let response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\nok";
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── POST /settings/folder_pane (body "true"|"false") — show/hide the folder pane ──
+                if first_line.contains("POST /settings/folder_pane") {
+                    let body_start = request.find("\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+                    let shown = request[body_start..].trim() == "true";
+                    let settings_path = config_dir.join("settings.toml");
+                    let ok = std::fs::read_to_string(&settings_path)
+                        .ok()
+                        .and_then(|s| toml::from_str::<omarchylook::models::Settings>(&s).ok())
+                        .and_then(|mut settings| {
+                            settings.ui.folder_pane = shown;
+                            toml::to_string_pretty(&settings).ok().map(|content| std::fs::write(&settings_path, content))
+                        })
+                        .is_some();
+                    debug!("POST /settings/folder_pane {} → {}", shown, ok);
                     let response = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\nok";
                     let _ = stream.write_all(response.as_bytes());
                     continue;

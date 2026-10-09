@@ -21,6 +21,7 @@ Item {
   property string pendingText: ""
   property var pendingOptions: []
   property string notice: ""
+  property int markCount: 0
 
   // Hints for the focused pane. ":" always opens the full command list.
   readonly property string hints: {
@@ -28,7 +29,7 @@ Item {
     if (focusPane === "folder") return "j/k move   l select   h back   tab next pane"
     if (focusPane === "reader") return "j/k scroll   space page   r reply   h back"
     if (currentView === "settings") return "j/k category   h back   tab next pane"
-    if (currentView === "mail") return "j/k move   l read   r reply   z read/unread   tab next pane"
+    if (currentView === "mail") return "j/k move   l read   r reply   a archive   x delete   m move   v mark   z read/unread"
     if (currentView === "calendar") return "j/k period   t today   d/w/m view   tab next pane"
     if (currentView === "tasks") return "j/k move   space done   f filter   tab next pane"
     return "j/k move   h back   tab next pane"
@@ -57,6 +58,14 @@ Item {
       text: root.currentView === "mail" ? root.viewLabel + " › " + root.folderName : root.viewLabel
       font.pixelSize: Style.font.caption
       font.bold: true
+    }
+
+    UiText {
+      visible: root.currentView === "mail" && root.markCount > 0
+      text: root.markCount + " marked"
+      foreground: Color.accent
+      font.bold: true
+      font.pixelSize: Style.font.caption
     }
 
     UiText {

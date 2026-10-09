@@ -42,6 +42,18 @@ pub trait EmailProvider: Send + Sync {
         Err(crate::errors::OmarchyError::HttpError("set_message_read not supported".into()))
     }
 
+    /// Carry out an archive / trash / delete / move on the provider. `from_folder` is the
+    /// (scoped) id of the folder the message is in. Err(transient) is retried later (see
+    /// `compose::is_transient`); anything else makes the daemon put the message back.
+    async fn apply_message_action(
+        &self,
+        _id: &str,
+        _from_folder: &str,
+        _action: &crate::models::MessageAction,
+    ) -> Result<()> {
+        Err(crate::errors::OmarchyError::HttpError("message actions not supported".into()))
+    }
+
     /// Send a composed message. `from` is the account's own address (providers that sign the
     /// From line themselves may ignore it). Err(transient) failures are retried by the outbox
     /// (see `compose::is_transient`); everything else is reported to the user.

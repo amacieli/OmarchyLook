@@ -75,10 +75,14 @@ Item {
     else app.activate()
   }
 
+  // Mail actions work on the message list and the reading pane only.
+  readonly property bool onMessages: inMail && (app.focusPane === "msg" || app.focusPane === "reader")
+
   function deleteItem() {
     var m = mod()
-    if (m && m.keyDelete) m.keyDelete()
-    else say("delete: not available here yet")
+    if (onMessages) app.deleteSelected()
+    else if (m && m.keyDelete) m.keyDelete()
+    else say("delete: nothing selected here")
   }
 
   // Pickers for typed commands (":goto cal", ":folder inb"): fuzzy-filtered entries
@@ -108,6 +112,20 @@ Item {
     return out
   }
 
+  // Folders the selected messages can move to: same account, not the folder they are in.
+  function pickMoveTargets(q) {
+    var out = [], m = app.folderModel, cur = app.selectedFolder
+    if (!cur) return out
+    for (var i = 0; i < m.count; i++) {
+      var f = m.get(i)
+      if (f.account_id !== cur.account_id || f.id === cur.id) continue
+      var name = String(f.display_name || "")
+      if (name === "" || !_fz(q, name)) continue
+      out.push({ id: "move." + i, title: name, keys: [], run: (function(fid, fname) { return function() { app.moveSelected(fid, fname) } })(f.id, name) })
+    }
+    return out
+  }
+
   function sync() { app.loadFolders(); app.loadMessages(); say("syncing…") }
 
   function soon(what) { return function() { say(what + ": not implemented yet") } }
@@ -132,11 +150,15 @@ Item {
     { id: "pane.next",  title: "Next pane",           scope: "global", keys: ["Tab"],        run: function() { app.cyclePane(1) } },
     { id: "pane.prev",  title: "Previous pane",       scope: "global", keys: ["S-Tab"],      run: function() { app.cyclePane(-1) } },
     { id: "pane.cycle", title: "Cycle pane (old key)", scope: "global", keys: ["s"], hidden: true, run: function() { app.cycleFocus() } },
-    { id: "pane.back",  title: "Back / cancel",       scope: "global", keys: ["Esc"],        run: function() { app.back() } },
+    { id: "pane.back",  title: "Back / cancel",       scope: "global", keys: ["Esc"],        run: function() { if (app.markCount > 0) app.clearMarks(); else app.back() } },
     { id: "pane.nav",     title: "Focus navigation",  scope: "global", keys: ["1"],          run: function() { app.focusPaneNamed("nav") } },
-    { id: "pane.folders", title: "Focus folders",     scope: "mail",   keys: ["2"],          run: function() { app.focusPaneNamed("folder") } },
-    { id: "pane.list",    title: "Focus list",        scope: "mail",   keys: ["3"],          run: function() { app.focusPaneNamed("msg") } },
-    { id: "pane.reader",  title: "Focus reading pane", scope: "mail",  keys: ["4"],          run: function() { app.focusPaneNamed("reader") } },
+    // Pane numbers follow what is on screen: with the folder pane hidden, list = 2, reader = 3.
+    { id: "pane.folders", title: "Focus folders",     scope: "mail",   keys: ["2"], when: function() { return app.showFolderPane }, run: function() { app.focusPaneNamed("folder") } },
+    { id: "pane.list",    title: "Focus list",        scope: "mail",   keys: ["3"], when: function() { return app.showFolderPane }, run: function() { app.focusPaneNamed("msg") } },
+    { id: "pane.reader",  title: "Focus reading pane", scope: "mail",  keys: ["4"], when: function() { return app.showFolderPane }, run: function() { app.focusPaneNamed("reader") } },
+    { id: "pane.list.nf",   title: "Focus list",        scope: "mail", keys: ["2"], when: function() { return !app.showFolderPane }, run: function() { app.focusPaneNamed("msg") } },
+    { id: "pane.reader.nf", title: "Focus reading pane", scope: "mail", keys: ["3"], when: function() { return !app.showFolderPane }, run: function() { app.focusPaneNamed("reader") } },
+    { id: "view.folders", title: "Show / hide folder pane", scope: "mail", keys: ["F"], ex: ["folders"], run: function() { app.toggleFolderPane() } },
     { id: "pane.list2",   title: "Focus list",        scope: "global", keys: ["2"], hidden: true, when: function() { return !inMail }, run: function() { app.focusPaneNamed("msg") } },
     { id: "view.close", title: "Back to navigation",  scope: "global", keys: ["q"],          run: function() { app.focusPaneNamed("nav") } },
     { id: "app.quit",   title: "Quit OmarchyLook",    scope: "global", keys: ["Q"], ex: ["q", "quit"], run: function() { root.quitRequested() } },
@@ -167,8 +189,13 @@ Item {
     { id: "mail.replyall", title: "Reply all",     scope: "mail", keys: ["R"], run: function() { app.openCompose("replyAll") } },
     { id: "mail.forward",  title: "Forward",       scope: "mail", keys: ["f"], run: function() { app.openCompose("forward") } },
     { id: "mail.read",     title: "Mark read / unread", scope: "mail", keys: ["z"], run: function() { app.toggleRead() } },
-    { id: "mail.archive",  title: "Archive",       scope: "mail", keys: ["a"], run: soon("archive") },
-    { id: "mail.undosend", title: "Undo send",     scope: "mail", keys: ["u"], run: function() { app.undoLatest() } },
+    { id: "mail.archive",  title: "Archive",       scope: "mail", keys: ["a"], when: function() { return onMessages }, run: function() { app.archiveSelected() } },
+    { id: "mail.trash",    title: "Delete (Trash; permanent in Trash)", scope: "mail", keys: [], ex: ["delete", "trash"], when: function() { return onMessages }, run: function() { app.deleteSelected() } },
+    { id: "mail.move",     title: "Move to folder…", scope: "mail", keys: ["m"], ex: ["move", "mv"], pick: pickMoveTargets, when: function() { return onMessages }, run: function() { root.paletteRequested("move ") } },
+    { id: "mail.mark",     title: "Mark / unmark message", scope: "mail", keys: ["v"], when: function() { return app.focusPane === "msg" }, run: function() { app.toggleMark(); app.moveVertical(1) } },
+    { id: "mail.markrange", title: "Mark range to cursor", scope: "mail", keys: ["V"], when: function() { return app.focusPane === "msg" }, run: function() { app.markRange() } },
+    { id: "mail.markall",  title: "Mark all in list", scope: "mail", keys: ["*"], when: function() { return app.focusPane === "msg" }, run: function() { app.markAll() } },
+    { id: "mail.undo",     title: "Undo last archive / delete / move, or unsend", scope: "mail", keys: ["u"], run: function() { if (!app.undoAction()) app.undoLatest() } },
 
     // calendar
     { id: "cal.next",  title: "Next period",     scope: "calendar/list", keys: ["j", "Down", "]"], run: function() { content.step(1) } },

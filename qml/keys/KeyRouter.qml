@@ -14,6 +14,9 @@ Item {
   // Innermost first. Changing them mid-chord cancels it.
   property var scopes: ["global"]
 
+  // Called first with every key press (even while a dialog is up); return true to consume it.
+  property var interceptor: null
+
   property var pending: []
   readonly property string pendingText: pending.join(" ")
   readonly property var pendingOptions: pending.length > 0 ? Cmd.resolve(commands, scopes, pending).prefixes : []
@@ -53,6 +56,7 @@ Item {
   }
 
   Keys.onPressed: function(e) {
+    if (interceptor && interceptor(e) === true) { e.accepted = true; return }
     if (blocked) return
     var t = token(e)
     if (t === "") return

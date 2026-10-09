@@ -87,7 +87,7 @@ function grouped(commands, first) {
   for (var i = 0; i < commands.length; i++) if (order.indexOf(commands[i].scope) < 0) order.push(commands[i].scope)
   var out = []
   for (var s = 0; s < order.length; s++) {
-    var cs = commands.filter(function(c) { return c.scope === order[s] && !c.hidden && c.keys.length > 0 })
+    var cs = commands.filter(function(c) { return c.scope === order[s] && !c.hidden && c.keys.length > 0 && (!c.when || c.when()) })
     if (cs.length) out.push({ scope: order[s], name: sectionName(order[s]), active: first.indexOf(order[s]) >= 0, commands: cs })
   }
   return out

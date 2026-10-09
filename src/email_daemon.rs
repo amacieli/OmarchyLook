@@ -170,6 +170,7 @@ impl EmailDaemon {
                         if now_push != seen_push {
                             seen_push = now_push;
                             self.push_pending_reads().await;
+                            self.push_due_actions().await;
                         }
                         tokio::select! {
                             _ = tokio::time::sleep_until(deadline) => break,
@@ -210,6 +211,7 @@ impl EmailDaemon {
     async fn sync_messages(&self, is_initial: bool) -> Result<usize> {
         // Local read/unread changes go out first, so the reconcile below cannot undo them.
         self.push_pending_reads().await;
+        self.push_due_actions().await;
 
         // Providers with a change feed (Graph delta) sync by changes: one cheap call per folder
         // instead of reading flags and re-crawling every folder.
@@ -379,6 +381,33 @@ impl EmailDaemon {
                 Err(e) => warn!("Could not push read={} for {}: {}", is_read, id, e),
             }
         }
+    }
+
+    /// Push archive / delete / move actions whose undo window is over. A transient failure
+    /// leaves the action queued for the next cycle; a refusal puts the message back in its list.
+    async fn push_due_actions(&self) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let due = match self.db.due_actions(now) {
+            Ok(d) => d,
+            Err(e) => { error!("Could not list due message actions: {}", e); return; }
+        };
+        if due.is_empty() { return; }
+        let mut changed = false;
+        for (id, folder, action) in due {
+            match self.provider.apply_message_action(&id, &folder, &action).await {
+                Ok(()) => {
+                    if let Err(e) = self.db.finish_message_action(&id) { error!("Could not finish action for {}: {}", id, e); }
+                    changed = true;
+                }
+                Err(e) if crate::compose::is_transient(&e) => warn!("Action {:?} for {} will be retried: {}", action, id, e),
+                Err(e) => {
+                    warn!("Action {:?} for {} was refused, putting the message back: {}", action, id, e);
+                    if let Err(e2) = self.db.revert_message_action(&id) { error!("Could not revert action for {}: {}", id, e2); }
+                    changed = true;
+                }
+            }
+        }
+        if changed { sync_state::bump_mail("message actions pushed"); }
     }
 
     /// Bring the cached read flags of a folder in line with the provider's.

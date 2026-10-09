@@ -334,6 +334,36 @@ impl super::EmailProvider for GraphEmailProvider {
         Self::check_response(response).await.map(|_| ())
     }
 
+    async fn apply_message_action(
+        &self,
+        id: &str,
+        _from_folder: &str,
+        action: &crate::models::MessageAction,
+    ) -> Result<()> {
+        use crate::models::MessageAction;
+        let token = self.get_token().await?;
+        let client = reqwest::Client::new();
+        let base = format!("https://graph.microsoft.com/v1.0/me/messages/{}", id);
+        // `archive` and `deleteditems` are well-known folder names Graph accepts as a destination.
+        let dest = match action {
+            MessageAction::Archive => "archive".to_string(),
+            MessageAction::Trash => "deleteditems".to_string(),
+            MessageAction::Move(d) => d.clone(),
+            MessageAction::Delete => String::new(),
+        };
+        let request = if *action == MessageAction::Delete {
+            client.delete(&base)
+        } else {
+            client.post(format!("{}/move", base)).json(&serde_json::json!({ "destinationId": dest }))
+        };
+        let response = request
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+        Self::check_response(response).await.map(|_| ())
+    }
+
     async fn send_message(&self, msg: &crate::compose::OutgoingMessage, _from: &str) -> Result<()> {
         use crate::compose::{graph_message_json, graph_send_mail_json};
         let token = self.get_token().await?;

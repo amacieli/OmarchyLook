@@ -67,6 +67,13 @@ FocusScope {
     readonly property string paneScope: appState.focusPane === "msg" ? "list" : appState.focusPane
     scopes: [paneScope, appState.currentView + "/" + paneScope, appState.currentView, "global"]
 
+    // A yes/no question (permanent delete) takes every key until it is answered.
+    interceptor: function(e) {
+      if (!appState.pendingConfirm) return false
+      confirmDialog.handleKey(e)
+      return true
+    }
+
     // Hand keys to text inputs / popups while they own focus.
     blocked: topBar.searchFocused || settingsEditing || appState.auth.showModal || palette.open || help.open
 
@@ -114,7 +121,7 @@ FocusScope {
 
         FolderBar {
           id: folderBar
-          visible: appState.currentView === "mail"
+          visible: appState.currentView === "mail" && appState.showFolderPane
           Layout.preferredWidth: visible ? implicitWidth : 0
           Layout.fillHeight: true
           model: appState.folderModel
@@ -171,6 +178,7 @@ FocusScope {
         pendingText: keyCatcher.pendingText
         pendingOptions: keyCatcher.pendingOptions
         notice: commands.notice
+        markCount: appState.markCount
       }
     }
 
@@ -202,7 +210,36 @@ FocusScope {
     options: keyCatcher.pendingOptions
   }
 
+  ConfirmDialog {
+    id: confirmDialog
+    anchors.fill: parent
+    z: 1100
+    opened: appState.pendingConfirm !== null
+    message: appState.pendingConfirm ? appState.pendingConfirm.message : ""
+    confirmText: appState.pendingConfirm ? appState.pendingConfirm.confirmText : "Confirm"
+    // Enter must never destroy mail by accident: the dialog opens on Cancel.
+    onOpenedChanged: if (opened) selectedIndex = 0
+    onCanceled: appState.pendingConfirm = null
+    onConfirmed: { var c = appState.pendingConfirm; appState.pendingConfirm = null; if (c) c.run() }
+  }
+
+  Connections {
+    target: appState
+    function onNotify(text) { commands.say(text) }
+  }
+
+  ActionToast {
+    id: actionToast
+    app: appState
+    anchors.right: parent.right
+    anchors.bottom: parent.bottom
+    anchors.rightMargin: Style.spacing.huge
+    anchors.bottomMargin: Style.space(40) + (sendToast.visible ? sendToast.height + Style.spacing.md : 0)
+    z: 900
+  }
+
   SendToast {
+    id: sendToast
     app: appState
     anchors.right: parent.right
     anchors.bottom: parent.bottom

@@ -835,6 +835,11 @@ Item {
         var s = JSON.parse(xhr.responseText)
         if (s.message_rendering === "html" || s.message_rendering === "system" || s.message_rendering === "system_sender")
           root.messageRendering = s.message_rendering
+        if (typeof s.folder_pane === "boolean") {
+          root._applyingSettings = true
+          root.showFolderPane = s.folder_pane
+          root._applyingSettings = false
+        }
         if (typeof s.sidebar_expanded === "boolean") {
           root._applyingSettings = true
           root.sidebarExpanded = s.sidebar_expanded
@@ -849,7 +854,171 @@ Item {
       request("POST", "/settings/sidebar_expanded", null, sidebarExpanded ? "true" : "false")
   }
 
-  onSelectedFolderIdChanged: loadMessages()
+  onSelectedFolderIdChanged: { clearMarks(); loadMessages() }
+
+  // ---- folder pane ------------------------------------------------------------------------
+  // Off by default: folders are reached with the folder picker (`g f`), and the message list
+  // titles itself with the folder (and account). `F` brings the pane back.
+  property bool showFolderPane: false
+  onShowFolderPaneChanged: {
+    if (!showFolderPane && focusPane === "folder") focusPane = "msg"
+    if (!_applyingSettings) request("POST", "/settings/folder_pane", null, showFolderPane ? "true" : "false")
+  }
+  function toggleFolderPane() { showFolderPane = !showFolderPane }
+
+  // "Inbox" or, with several accounts, "Inbox · adam@example.com".
+  readonly property string selectedFolderLabel: {
+    var f = selectedFolder
+    if (!f) return selectedFolderName
+    var accounts = {}, n = 0
+    for (var i = 0; i < folderModelObj.count; i++) {
+      var e = folderModelObj.get(i).account_email || ""
+      if (e !== "" && !accounts[e]) { accounts[e] = true; n++ }
+    }
+    return n > 1 && f.account_email ? selectedFolderName + " · " + f.account_email : selectedFolderName
+  }
+
+  // ---- marks and mailbox actions (archive / delete / move) -------------------------------
+  // `v` marks messages; actions apply to the marked ones, or to the message under the cursor
+  // when nothing is marked. The rows vanish at once; the backend holds the change for the mail
+  // "send delay" (Settings -> Mail) so `u` can take it back, then pushes it to the provider.
+  signal notify(string text)
+  property var marks: ({})
+  property int markCount: 0
+  property int _markAnchor: -1
+
+  function _setMarks(m) { marks = m; markCount = Object.keys(m).length }
+  function clearMarks() { if (markCount > 0) _setMarks({}); _markAnchor = -1 }
+  function _copyMarks() { var m = {}; for (var k in marks) m[k] = true; return m }
+
+  function toggleMark(index) {
+    var i = index === undefined ? msgIndex : index
+    if (i < 0 || i >= messageModelObj.count) return
+    var id = messageModelObj.get(i).id
+    var m = _copyMarks()
+    if (m[id]) delete m[id]; else m[id] = true
+    _setMarks(m)
+    _markAnchor = i
+  }
+
+  // Mark everything between the last marked row and the cursor.
+  function markRange() {
+    var a = _markAnchor >= 0 ? _markAnchor : msgIndex
+    var lo = Math.min(a, msgIndex), hi = Math.max(a, msgIndex)
+    var m = _copyMarks()
+    for (var i = lo; i <= hi && i < messageModelObj.count; i++) m[messageModelObj.get(i).id] = true
+    _setMarks(m)
+  }
+
+  function markAll() {
+    var m = {}
+    for (var i = 0; i < messageModelObj.count; i++) m[messageModelObj.get(i).id] = true
+    _setMarks(m)
+  }
+
+  // Ids an action applies to, in list order.
+  function actionTargets() {
+    var ids = []
+    if (markCount > 0) {
+      for (var i = 0; i < messageModelObj.count; i++) {
+        var id = messageModelObj.get(i).id
+        if (marks[id]) ids.push(id)
+      }
+    } else if (currentMessageId !== "") ids.push(currentMessageId)
+    return ids
+  }
+
+  readonly property string selectedFolderKind: selectedFolder ? String(selectedFolder.well_known_name || "").toLowerCase() : ""
+  readonly property bool inTrashFolder: selectedFolderKind === "deleteditems"
+
+  // The undo window of the latest action: { ids, label, unread, until (ms) }, or null.
+  property var lastAction: null
+  property real actionNow: Date.now()
+  Timer {
+    interval: 250; repeat: true; running: root.lastAction !== null
+    onTriggered: {
+      root.actionNow = Date.now()
+      if (root.lastAction && root.actionNow >= root.lastAction.until) root.lastAction = null
+    }
+  }
+
+  // Pending yes/no question (permanent delete): { message, confirmText, run }, or null.
+  property var pendingConfirm: null
+
+  function _noun(n) { return n === 1 ? "1 message" : n + " messages" }
+
+  function archiveSelected() {
+    if (selectedFolderKind === "archive") { notify("Already in Archive"); return }
+    runAction("archive", "", "")
+  }
+
+  // `x`: Deleted Items / Trash -> ask, then delete for good; anywhere else -> move to Trash.
+  function deleteSelected() {
+    var ids = actionTargets()
+    if (ids.length === 0) return
+    if (inTrashFolder) {
+      pendingConfirm = {
+        message: "Delete " + _noun(ids.length) + " permanently? This cannot be undone.",
+        confirmText: "Delete",
+        run: function() { runAction("delete", "", "") }
+      }
+      return
+    }
+    runAction("trash", "", "")
+  }
+
+  function moveSelected(destId, destName) { runAction("move", destId, destName) }
+
+  function runAction(op, dest, destName) {
+    var ids = actionTargets()
+    if (ids.length === 0) return
+    var verb = op === "archive" ? "Archived" : op === "trash" ? "Deleted" : op === "delete" ? "Permanently deleted"
+             : "Moved to " + destName
+    var set = {}
+    ids.forEach(function(id) { set[id] = true })
+
+    // Hide the rows now; the cursor keeps its place so the next message takes over.
+    var unread = 0
+    for (var i = messageModelObj.count - 1; i >= 0; i--) {
+      var row = messageModelObj.get(i)
+      if (!set[row.id]) continue
+      if (!row.is_read) unread++
+      messageModelObj.remove(i)
+    }
+    if (unread > 0) _bumpFolderUnread(selectedFolderId, -unread)
+    if (msgIndex >= messageModelObj.count) msgIndex = Math.max(0, messageModelObj.count - 1)
+    clearMarks()
+
+    var path = "/messages/action?ids=" + encodeURIComponent(ids.join(",")) + "&op=" + op
+             + (op === "move" ? "&dest=" + encodeURIComponent(dest) : "")
+    request("POST", path, function(xhr) {
+      var res = null
+      try { res = JSON.parse(xhr.responseText) } catch (e) {}
+      if (xhr.status !== 200 || !res || res.error !== undefined) {
+        notify("Could not " + op + ": " + ((res && res.error) ? res.error : "backend did not answer"))
+        loadMessages()
+        loadFolders()
+        return
+      }
+      if (res.delay_secs > 0)
+        root.lastAction = { ids: ids, label: verb + " " + _noun(ids.length), unread: unread, until: Date.now() + res.delay_secs * 1000 }
+      else root.lastAction = null
+      root.actionNow = Date.now()
+    })
+  }
+
+  // `u`: take back the latest action while its window is open. True when there was one.
+  function undoAction() {
+    var a = lastAction
+    if (!a) return false
+    lastAction = null
+    request("POST", "/messages/action/undo?ids=" + encodeURIComponent(a.ids.join(",")), function(xhr) {
+      if (a.unread > 0) _bumpFolderUnread(selectedFolderId, a.unread)
+      loadMessages()
+      notify("Restored " + _noun(a.ids.length))
+    })
+    return true
+  }
 
   // Backend may still be starting: retry until it answers, then load once.
   Timer {
@@ -872,7 +1041,8 @@ Item {
   }
 
   function drillIn() {
-    if (currentView === "mail") { focusPane = "folder"; folderIndex = Math.max(0, folderIndex) }
+    if (currentView === "mail" && showFolderPane) { focusPane = "folder"; folderIndex = Math.max(0, folderIndex) }
+    else if (currentView === "mail") focusPane = "msg"
     else { focusPane = "msg"; msgIndex = 0 }
   }
 
@@ -943,13 +1113,14 @@ Item {
   // `h` / Esc: one pane to the left. Never closes the window (that is `Q`).
   function back() {
     if (focusPane === "reader") focusPane = "msg"
-    else if (focusPane === "msg") focusPane = currentView === "mail" ? "folder" : "nav"
+    else if (focusPane === "msg") focusPane = currentView === "mail" && showFolderPane ? "folder" : "nav"
     else if (focusPane === "folder") focusPane = "nav"
   }
 
   // Panes that exist in the current view, left to right.
   function panesInView() {
-    return currentView === "mail" ? ["nav", "folder", "msg", "reader"] : ["nav", "msg"]
+    if (currentView !== "mail") return ["nav", "msg"]
+    return showFolderPane ? ["nav", "folder", "msg", "reader"] : ["nav", "msg", "reader"]
   }
 
   // Put the cursor in `pane` (no-op if the view has no such pane). Entering the

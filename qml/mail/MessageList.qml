@@ -11,13 +11,16 @@ import "format.js" as Fmt
 Item {
   id: root
 
-  PaneFrame { focused: root.paneFocused; hotkey: "\u00b3"; title: root.folderName }
+  PaneFrame { focused: root.paneFocused; hotkey: root.hotkey; title: root.frameTitle !== "" ? root.frameTitle : root.folderName }
 
   property var model
   property string folderName: "Inbox"
   property string status: ""
   property int currentIndex: 0
   property bool paneFocused: false
+  property var marks: ({})
+  property string frameTitle: ""
+  property string hotkey: "\u00b3"
 
   // Rows that fit in one screenful (less one for overlap): the step PageUp/PageDown take.
   readonly property int pageRows: list.count > 0 && list.contentHeight > 0
@@ -101,9 +104,11 @@ Item {
         readonly property bool hasCursor: root.paneFocused && root.currentIndex === index
         readonly property bool isCurrent: root.currentIndex === index
         readonly property bool unread: !model.is_read
+        readonly property bool marked: root.marks[model.id] === true
 
         radius: Style.cornerRadius
         color: hasCursor ? Style.hoverFillFor(Color.foreground, Color.accent)
+             : marked ? Style.selectedAccentFill
              : isCurrent ? Style.selectedFillFor(Color.foreground, Color.accent)
              : mouse.containsMouse ? Style.normalFillFor(Color.foreground, Color.accent)
              : "transparent"
@@ -127,6 +132,13 @@ Item {
           anchors.topMargin: Style.spacing.lg
           anchors.bottomMargin: Style.spacing.lg
           spacing: Style.spacing.md
+
+          UiText {
+            visible: row.marked
+            text: "\u2713"
+            foreground: Color.accent
+            font.bold: true
+          }
 
           ColumnLayout {
             Layout.fillWidth: true

@@ -318,6 +318,10 @@ pub struct UiSettings {
     /// with "always HTML"). See `settings::normalize_message_rendering`.
     #[serde(default = "default_message_rendering")]
     pub message_rendering: String,
+    /// Show the folder pane in the mail view (off by default: folders are reached with the
+    /// folder picker, `g f`).
+    #[serde(default)]
+    pub folder_pane: bool,
 }
 
 fn default_message_rendering() -> String { "system_sender".to_string() }
@@ -359,6 +363,7 @@ impl Default for Settings {
                 animation_enabled: true,
                 sidebar_expanded: true,
                 message_rendering: default_message_rendering(),
+                folder_pane: false,
             },
             sync: SyncSettings {
                 poll_interval_secs: 120, // 2 minute polling interval for email daemon
@@ -368,5 +373,54 @@ impl Default for Settings {
             calendar: CalendarSettings::default(),
             mail: MailSettings::default(),
         }
+    }
+}
+
+/// A mailbox operation that moves a message out of the list it is in. Queued locally first
+/// (the row is hidden at once), pushed to the provider after the undo window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageAction {
+    /// Out of the inbox into the archive (Gmail: drop the INBOX label).
+    Archive,
+    /// Into Deleted Items / Trash.
+    Trash,
+    /// Gone for good (only from Deleted Items / Trash).
+    Delete,
+    /// Into another folder of the same account (provider folder id).
+    Move(String),
+}
+
+impl MessageAction {
+    /// The form stored in `messages.action_pending`.
+    pub fn to_db(&self) -> String {
+        match self {
+            MessageAction::Archive => "archive".into(),
+            MessageAction::Trash => "trash".into(),
+            MessageAction::Delete => "delete".into(),
+            MessageAction::Move(dest) => format!("move:{}", dest),
+        }
+    }
+
+    pub fn from_db(s: &str) -> Option<Self> {
+        match s {
+            "archive" => Some(MessageAction::Archive),
+            "trash" => Some(MessageAction::Trash),
+            "delete" => Some(MessageAction::Delete),
+            _ => s.strip_prefix("move:").filter(|d| !d.is_empty()).map(|d| MessageAction::Move(d.to_string())),
+        }
+    }
+}
+
+#[cfg(test)]
+mod message_action_tests {
+    use super::*;
+
+    #[test]
+    fn round_trips_through_the_db_form() {
+        for a in [MessageAction::Archive, MessageAction::Trash, MessageAction::Delete, MessageAction::Move("AAMk=/x:y".into())] {
+            assert_eq!(MessageAction::from_db(&a.to_db()), Some(a));
+        }
+        assert_eq!(MessageAction::from_db("move:"), None);
+        assert_eq!(MessageAction::from_db("bogus"), None);
     }
 }
