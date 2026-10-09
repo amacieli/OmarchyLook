@@ -63,7 +63,9 @@ path = "src/main.rs"
 [profile.release]
 opt-level = 3
 lto = false
-codegen-units = 1
+# 16 units lets LLVM use many cores; 1 unit (max inlining) is single-threaded for every crate:
+# measured on 32 cores, rebuild after an edit 11.5 s -> 3.9 s, clean 46 s -> 39 s, binary 12.6 -> 14.6 MB.
+codegen-units = 16
 strip = true
 
 [profile.dev]
