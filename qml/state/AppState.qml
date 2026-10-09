@@ -899,6 +899,140 @@ Item {
     return n > 1 && f.account_email ? selectedFolderName + " · " + f.account_email : selectedFolderName
   }
 
+  // ---- categories (Exchange) / tags (Gmail) --------------------------------------------
+  // `t` opens a picker for the message under the cursor (or the marked ones): toggle an
+  // existing category, or make a new one with a colour. Names sync with the provider; the
+  // account's category list comes from /categories.
+  property var catDefs: []             // [{ name, color, pending }] of catAccountId
+  property var catPalette: []          // [{ key, label, hex }]
+  property bool catMasterList: true    // false: Exchange will not show/colour categories until the account signs in again
+  property string catAccountId: ""
+  property string pendingCatName: ""   // new category waiting for its colour
+
+  function targetAccountId() { var m = currentMessage; return m ? String(m.account_id || "") : "" }
+
+  function accountProvider(id) {
+    for (var i = 0; i < accounts.length; i++) if (accounts[i].id === id) return accounts[i].provider
+    return ""
+  }
+
+  // What the provider calls them: Exchange categories, Gmail labels (shown as tags), others labels.
+  function tagNoun(id) {
+    var p = accountProvider(id !== undefined ? id : targetAccountId())
+    return p === "gmail" ? "tag" : (p === "exchange" || p === "" ? "category" : "label")
+  }
+
+  function loadCategories(accountId, done) {
+    catAccountId = accountId
+    request("GET", "/categories?account=" + encodeURIComponent(accountId), function(xhr) {
+      if (xhr.status !== 200) return
+      try {
+        var d = JSON.parse(xhr.responseText)
+        catDefs = d.categories || []
+        catPalette = d.palette || []
+        catMasterList = d.master_list !== false
+      } catch (e) { console.log("[Categories] parse error:", e) }
+      if (done) done()
+    })
+  }
+
+  function _rowsFor(ids) {
+    var set = {}, out = []
+    ids.forEach(function(id) { set[id] = true })
+    for (var i = 0; i < messageModelObj.count; i++) {
+      var r = messageModelObj.get(i)
+      if (set[r.id]) out.push({ index: i, row: r })
+    }
+    return out
+  }
+
+  function _catsOf(row) { return Fmt.categories(row) }
+
+  // "all" | "some" | "none": how many of the target messages carry `name`.
+  function tagState(name) {
+    var rows = _rowsFor(actionTargets())
+    if (rows.length === 0) return "none"
+    var n = 0, lower = name.toLowerCase()
+    rows.forEach(function(x) { if (_catsOf(x.row).some(function(c) { return String(c[0]).toLowerCase() === lower })) n++ })
+    return n === rows.length ? "all" : (n === 0 ? "none" : "some")
+  }
+
+  function _catColor(name) {
+    var lower = name.toLowerCase()
+    for (var i = 0; i < catDefs.length; i++) if (String(catDefs[i].name).toLowerCase() === lower) return catDefs[i].color
+    return "#8a8886"
+  }
+
+  // Everything has it -> take it off all; otherwise put it on all.
+  function toggleTag(name) {
+    var ids = actionTargets()
+    if (ids.length === 0) return
+    var rows = _rowsFor(ids)
+    var remove = tagState(name) === "all"
+    var lower = name.toLowerCase(), color = _catColor(name)
+    var noun = tagNoun()
+    rows.forEach(function(x) {
+      var list = _catsOf(x.row).filter(function(c) { return String(c[0]).toLowerCase() !== lower })
+      if (!remove) list.push([name, color])
+      messageModelObj.setProperty(x.index, "cats", JSON.stringify(list))
+    })
+    request("POST", "/messages/category?ids=" + encodeURIComponent(ids.join(",")) + "&op=" + (remove ? "remove" : "add")
+            + "&name=" + encodeURIComponent(name), function(xhr) {
+      var res = null
+      try { res = JSON.parse(xhr.responseText) } catch (e) {}
+      if (xhr.status !== 200 || !res || res.error !== undefined) {
+        notify("Could not change " + noun + ": " + ((res && res.error) ? res.error : "backend did not answer"))
+        loadMessages()
+      }
+    })
+    notify((remove ? "Removed " : "Added ") + noun + " \u201c" + name + "\u201d" + (ids.length > 1 ? " on " + ids.length + " messages" : ""))
+  }
+
+  // A new category: no colour step when Exchange cannot take colours yet.
+  function beginNewCategory(name) {
+    pendingCatName = name
+    if (!catMasterList && accountProvider(targetAccountId()) === "exchange") createCategory(name, "blue")
+    else focusPaletteRequested("tagcolor ")
+  }
+  signal focusPaletteRequested(string prefill)
+
+  function createCategory(name, colorKey) {
+    var acct = targetAccountId()
+    pendingCatName = ""
+    request("POST", "/categories/create?account=" + encodeURIComponent(acct) + "&name=" + encodeURIComponent(name)
+            + "&color=" + encodeURIComponent(colorKey), function(xhr) {
+      var res = null
+      try { res = JSON.parse(xhr.responseText) } catch (e) {}
+      if (xhr.status !== 200 || !res || res.error !== undefined) {
+        notify("Could not create " + tagNoun(acct) + ": " + ((res && res.error) ? res.error : "backend did not answer"))
+        return
+      }
+      var hex = "#8a8886"
+      for (var i = 0; i < catPalette.length; i++) if (catPalette[i].key === colorKey) hex = catPalette[i].hex
+      var defs = catDefs.slice()
+      defs.push({ name: name, color: hex, pending: true })
+      catDefs = defs
+      toggleTag(name)
+    })
+  }
+
+  // ---- one-time repopulate of message details (progress) ---------------------------------
+  property bool metaActive: false
+  property int metaRemaining: 0
+  Timer {
+    interval: 4000; repeat: true; running: root.backendOnline; triggeredOnStart: true
+    onTriggered: root.request("GET", "/messages/meta_progress", function(xhr) {
+      if (xhr.status !== 200) return
+      try {
+        var d = JSON.parse(xhr.responseText)
+        var wasActive = root.metaActive
+        root.metaActive = d.active === true && d.remaining > 0
+        root.metaRemaining = d.remaining
+        if (wasActive && !root.metaActive) root.loadMessages()   // the details are in: show them
+      } catch (e) {}
+    })
+  }
+
   // ---- marks and mailbox actions (archive / delete / move) -------------------------------
   // `v` marks messages; actions apply to the marked ones, or to the message under the cursor
   // when nothing is marked. The rows vanish at once; the backend holds the change for the mail

@@ -23,6 +23,8 @@ Item {
   property var pendingOptions: []
   property string notice: ""
   property int markCount: 0
+  property bool metaActive: false
+  property int metaRemaining: 0
   // keyOf(commandId) -> the key currently bound to it, so hints follow rebinding.
   property var keyOf: function(id) { return "" }
   function k(id, label) { var key = keyOf(id); return key === "" ? "" : key + " " + label }
@@ -70,6 +72,13 @@ Item {
       text: root.markCount + " marked"
       foreground: Color.accent
       font.bold: true
+      font.pixelSize: Style.font.caption
+    }
+
+    UiText {
+      visible: root.metaActive
+      text: "filling in message details \u00b7 " + root.fmt(root.metaRemaining) + " to go"
+      dim: true
       font.pixelSize: Style.font.caption
     }
 

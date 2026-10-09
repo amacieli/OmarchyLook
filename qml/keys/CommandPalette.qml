@@ -124,6 +124,14 @@ Item {
             anchors.rightMargin: Style.spacing.md
             spacing: Style.spacing.lg
 
+            Rectangle {
+              visible: !!modelData.swatch
+              Layout.preferredWidth: Style.space(12)
+              Layout.preferredHeight: Style.space(12)
+              color: modelData.swatch ? modelData.swatch : "transparent"
+              radius: Math.max(Style.cornerRadius, 2)
+            }
+
             UiText {
               id: rowText
               Layout.fillWidth: true

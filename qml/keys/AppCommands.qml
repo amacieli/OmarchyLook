@@ -127,6 +127,50 @@ Item {
     return out
   }
 
+  // ---- categories / tags -------------------------------------------------------
+  // Category picker entries for the message(s) under the cursor: existing ones (✓ all, – some
+  // carry it), then "New …". Typed text filters; a name that matches nothing offers to create it.
+  function pickTags(q) {
+    var acct = app.targetAccountId()
+    if (acct === "") return []
+    if (app.catAccountId !== acct) {
+      app.loadCategories(acct)
+      return [{ id: "tag.loading", title: "loading…", keys: [], run: function() {} }]
+    }
+    var out = []
+    var noun = app.tagNoun(acct)
+    if (!app.catMasterList && app.accountProvider(acct) === "exchange")
+      out.push({ id: "tag.signin", title: "\u26a0 category colours need a fresh Exchange sign-in (Settings \u203a Accounts)", keys: [], run: function() { app.openSettingsCategory("account") } })
+    var exact = false, query = q.trim()
+    app.catDefs.forEach(function(d) {
+      if (String(d.name).toLowerCase() === query.toLowerCase()) exact = true
+      if (query !== "" && !_fz(query, d.name)) return
+      var st = app.tagState(d.name)
+      out.push({ id: "tag." + d.name, title: (st === "all" ? "\u2713 " : st === "some" ? "\u2013 " : "   ") + d.name,
+                 swatch: d.color, keys: [], run: (function(n) { return function() { app.toggleTag(n) } })(d.name) })
+    })
+    if (query !== "" && !exact)
+      out.push({ id: "tag.new", title: "+ New " + noun + " \u201c" + query + "\u201d\u2026", keys: [], run: function() { app.beginNewCategory(query) } })
+    if (out.length === 0) out.push({ id: "tag.none", title: "no " + noun + "s yet \u2014 type a name to create one", keys: [], run: function() {} })
+    return out
+  }
+
+  function pickColors(q) {
+    if (app.pendingCatName === "") return []
+    var out = []
+    app.catPalette.forEach(function(c) {
+      if (q.trim() !== "" && !_fz(q, c.label)) return
+      out.push({ id: "color." + c.key, title: c.label, swatch: c.hex, keys: [], run: function() { app.createCategory(app.pendingCatName, c.key) } })
+    })
+    return out
+  }
+
+  function openTagPicker() {
+    var acct = app.targetAccountId()
+    if (acct === "") return
+    app.loadCategories(acct, function() { root.paletteRequested("tag ") })
+  }
+
   function sync() { app.loadFolders(); app.loadMessages(); say("syncing…") }
 
   function soon(what) { return function() { say(what + ": not implemented yet") } }
@@ -212,6 +256,8 @@ Item {
     { id: "mail.mark",     title: "Mark / unmark message", scope: "mail", keys: ["v"], when: function() { return app.focusPane === "msg" }, run: function() { app.toggleMark(); app.moveVertical(1) } },
     { id: "mail.markrange", title: "Mark range to cursor", scope: "mail", keys: ["V"], when: function() { return app.focusPane === "msg" }, run: function() { app.markRange() } },
     { id: "mail.markall",  title: "Mark all in list", scope: "mail", keys: ["*"], when: function() { return app.focusPane === "msg" }, run: function() { app.markAll() } },
+    { id: "mail.tag",      title: "Set category / tag\u2026", scope: "mail", keys: ["t"], ex: ["tag", "category", "cat"], pick: pickTags, when: function() { return onMessages }, run: function() { openTagPicker() } },
+    { id: "mail.tagcolor", title: "Colour for the new category\u2026", scope: "mail", keys: [], hidden: true, ex: ["tagcolor"], pick: pickColors, run: function() {} },
     { id: "mail.undo",     title: "Undo last archive / delete / move, or unsend", scope: "mail", keys: ["u"], run: function() { if (!app.undoAction()) app.undoLatest() } },
 
     // calendar

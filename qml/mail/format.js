@@ -34,10 +34,20 @@ function fullDate(s) {
   return d.getFullYear() + "-" + _pad(d.getMonth() + 1) + "-" + _pad(d.getDate()) + "  " + _pad(d.getHours()) + ":" + _pad(d.getMinutes())
 }
 
+// "to  Bob <bob@x.org>, …" lines for the reading pane; empty when there is nothing to show.
+function recipientLine(label, text) {
+  return text && text.length > 0 ? label + "  " + text : ""
+}
+
 function recipients(m) {
   if (!m) return ""
-  var to = m.to_recipients || m.to || ""
-  return to.length > 0 ? "to  " + to : ""
+  return recipientLine("to ", m.to_text || m.to_recipients || m.to || "")
+}
+
+// Categories of a message row: [[name, "#rrggbb"], …] (the list model stores them as JSON text).
+function categories(m) {
+  if (!m || !m.cats) return []
+  try { var c = JSON.parse(m.cats); return Array.isArray(c) ? c : [] } catch (e) { return [] }
 }
 
 function body(m) {

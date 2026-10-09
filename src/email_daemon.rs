@@ -59,6 +59,10 @@ pub struct EmailDaemon {
     config: DaemonConfig,
     db: Arc<Database>,
     provider: Arc<dyn EmailProvider>,
+    /// Last `read_push_serial` whose pushes (reads, actions, categories) were carried out.
+    seen_push: std::sync::atomic::AtomicU64,
+    /// When the UI was last told about a delta page while repopulating details (throttle).
+    last_meta_bump: std::sync::Mutex<Option<Instant>>,
 }
 
 impl EmailDaemon {
@@ -67,7 +71,11 @@ impl EmailDaemon {
         db: Arc<Database>,
         provider: Arc<dyn EmailProvider>,
     ) -> Self {
-        Self { config, db, provider }
+        Self {
+            config, db, provider,
+            seen_push: std::sync::atomic::AtomicU64::new(sync_state::read_push_serial()),
+            last_meta_bump: std::sync::Mutex::new(None),
+        }
     }
 
     /// Current mail poll interval: `[sync] poll_interval_secs` from settings.toml when a path is
@@ -95,7 +103,6 @@ impl EmailDaemon {
         let mut authenticated_once = false;
 
         let acct = self.db.account_id().to_string();
-        let mut seen_push = sync_state::read_push_serial();
         perf::mark(&format!("mail[{}] daemon started", acct));
         loop {
             // Re-read each cycle so a change in settings.toml applies without a restart.
@@ -179,11 +186,8 @@ impl EmailDaemon {
                         // Registered before the serial check, so a click cannot slip between them.
                         let _ = wake.as_mut().enable();
                         let now_push = sync_state::read_push_serial();
-                        if now_push != seen_push {
-                            seen_push = now_push;
-                            self.push_pending_reads().await;
-                            self.push_due_actions().await;
-                            self.push_pending_categories().await;
+                        if now_push != self.seen_push.load(std::sync::atomic::Ordering::SeqCst) {
+                            self.service_pushes().await;
                         }
                         tokio::select! {
                             _ = tokio::time::sleep_until(deadline) => break,
@@ -336,7 +340,14 @@ impl EmailDaemon {
                         removed += d;
                         // Tell the UI as the newest pages land, not only at the end.
                         if (c > 0 || d > 0) && (!complete || pages == 1) {
-                            sync_state::bump_mail(&format!("delta page: {} changed, {} removed ({})", c, d, folder_name));
+                            // While details are being repopulated nearly every page "changes"; tell the
+                            // UI at most every 30 s then, so the list is not reloaded under the user.
+                            let repopulating = sync_state::meta_active();
+                            let mut last = self.last_meta_bump.lock().unwrap_or_else(|p| p.into_inner());
+                            if !repopulating || last.map(|t| t.elapsed() >= Duration::from_secs(30)).unwrap_or(true) {
+                                *last = Some(Instant::now());
+                                sync_state::bump_mail(&format!("delta page: {} changed, {} removed ({})", c, d, folder_name));
+                            }
                         }
                     }
                     Err(e) => {
@@ -345,6 +356,7 @@ impl EmailDaemon {
                         return Err(e);
                     }
                 }
+                self.service_pushes().await;
                 tokio::task::yield_now().await;
             }
 
@@ -396,6 +408,17 @@ impl EmailDaemon {
                 Err(e) => warn!("Could not push read={} for {}: {}", is_read, id, e),
             }
         }
+    }
+
+    /// Carry out whatever the UI queued (read flags, archive/delete/move, categories) if it
+    /// asked since the last time. Also called between the pages of a long walk, so a click is
+    /// not stuck behind the one-time repopulate.
+    async fn service_pushes(&self) {
+        let now = sync_state::read_push_serial();
+        if now == self.seen_push.swap(now, std::sync::atomic::Ordering::SeqCst) { return; }
+        self.push_pending_reads().await;
+        self.push_due_actions().await;
+        self.push_pending_categories().await;
     }
 
     /// One-time repopulate of the message details (sender name, To/Cc/Bcc, categories, …) for

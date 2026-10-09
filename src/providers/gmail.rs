@@ -239,23 +239,29 @@ impl GmailProvider {
 
     /// Metadata for each raw id, a few requests at a time. A message that fails is skipped
     /// (it is retried next sync, because it never became "known").
-    async fn fetch_metadata(&self, folder_id: &str, raw_ids: Vec<String>) -> Vec<EmailMessage> {
+    async fn fetch_metadata(&self, folder_id: &str, raw_ids: Vec<String>, keep_gone: bool) -> Vec<EmailMessage> {
         let mut out = Vec::with_capacity(raw_ids.len());
         for chunk in raw_ids.chunks(FETCH_CONCURRENCY) {
             let mut set = tokio::task::JoinSet::new();
             for id in chunk {
                 let api = Arc::clone(&self.api);
+                let raw_id = id.clone();
                 let url = format!(
                     "{}/messages/{}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Bcc&metadataHeaders=Date&metadataHeaders=Importance&metadataHeaders=X-Priority",
                     BASE, urlencoding::encode(id)
                 );
-                set.spawn(async move { api.get(&url).await });
+                set.spawn(async move { (raw_id, api.get(&url).await) });
             }
             let labels = self.labels.lock().unwrap_or_else(|p| p.into_inner()).clone();
             while let Some(res) = set.join_next().await {
                 match res {
-                    Ok(Ok(json)) => out.extend(parse_message(&self.account_id, folder_id, &json, &labels)),
-                    Ok(Err(e)) => warn!("Gmail: skipping a message that could not be fetched: {}", e),
+                    Ok((_, Ok(json))) => out.extend(parse_message(&self.account_id, folder_id, &json, &labels)),
+                    // Gone from the mailbox: report it without details so the repopulate stops asking.
+                    Ok((raw, Err(e))) if keep_gone && e.to_string().contains("404") => {
+                        debug!("Gmail: message {} no longer exists on the server", raw);
+                        out.push(EmailMessage { id: scoped(&self.account_id, &raw), meta: false, ..Default::default() });
+                    }
+                    Ok((_, Err(e))) => warn!("Gmail: skipping a message that could not be fetched: {}", e),
                     Err(e) => warn!("Gmail: fetch task failed: {}", e),
                 }
             }
@@ -269,7 +275,7 @@ impl GmailProvider {
         let known = self.known(&scoped_ids);
         let fresh: Vec<String> = raw_ids.into_iter().filter(|r| !known.contains(&scoped(&self.account_id, r))).collect();
         if fresh.is_empty() { return Vec::new(); }
-        self.fetch_metadata(folder_id, fresh).await
+        self.fetch_metadata(folder_id, fresh, false).await
     }
 
     /// Full body of one message: (content type "html"|"text", content).
@@ -479,7 +485,7 @@ impl super::EmailProvider for GmailProvider {
     async fn fetch_message_meta(&self, ids: &[String]) -> Vec<EmailMessage> {
         self.ensure_labels().await;
         let raw: Vec<String> = ids.iter().map(|i| unscoped(&self.account_id, i).to_string()).collect();
-        self.fetch_metadata("", raw).await
+        self.fetch_metadata("", raw, true).await
     }
 
     async fn is_token_valid(&self) -> Result<bool> {

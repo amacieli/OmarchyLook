@@ -172,6 +172,8 @@ FocusScope {
         pendingOptions: keyCatcher.pendingOptions
         notice: commands.notice
         markCount: appState.markCount
+        metaActive: appState.metaActive
+        metaRemaining: appState.metaRemaining
         keyOf: commands.keyOf
       }
     }
@@ -220,6 +222,7 @@ FocusScope {
   Connections {
     target: appState
     function onNotify(text) { commands.say(text) }
+    function onFocusPaletteRequested(prefill) { palette.show(prefill) }
   }
 
   ActionToast {

@@ -146,13 +146,54 @@ Item {
         }
       }
 
-      UiText {
-        visible: text.length > 0
-        text: Fmt.recipients(root.message)
+      // To / Cc / Bcc: one line each, only the ones that exist.
+      Repeater {
+        model: [
+          { label: "to ",  key: "to_text" },
+          { label: "cc ",  key: "cc_text" },
+          { label: "bcc",  key: "bcc_text" }
+        ]
+        UiText {
+          required property var modelData
+          readonly property string line: root.message ? Fmt.recipientLine(modelData.label, root.message[modelData.key]) : ""
+          visible: line.length > 0
+          text: line
+          Layout.fillWidth: true
+          elide: Text.ElideRight
+          dim: true
+          font.pixelSize: Style.font.caption
+        }
+      }
+
+      // Importance, attachments and categories.
+      Flow {
         Layout.fillWidth: true
-        elide: Text.ElideRight
-        dim: true
-        font.pixelSize: Style.font.caption
+        spacing: Style.spacing.md
+        visible: importanceMark.visible || attachMark.visible || cats.count > 0
+
+        UiText {
+          id: importanceMark
+          visible: !!root.message && root.message.importance === "high"
+          text: "\uf06a  high importance"
+          foreground: Color.urgent
+          font.pixelSize: Style.font.caption
+        }
+        UiText {
+          id: attachMark
+          visible: !!root.message && root.message.has_attachments === true
+          text: "\uf0c6  attachments"
+          dim: true
+          font.pixelSize: Style.font.caption
+        }
+        Repeater {
+          id: cats
+          model: root.message ? Fmt.categories(root.message) : []
+          CategoryChip {
+            required property var modelData
+            label: modelData[0]
+            tint: modelData[1]
+          }
+        }
       }
     }
 

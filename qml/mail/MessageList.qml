@@ -105,6 +105,7 @@ Item {
         readonly property bool isCurrent: root.currentIndex === index
         readonly property bool unread: !model.is_read
         readonly property bool marked: root.marks[model.id] === true
+        readonly property var cats: Fmt.categories(model)
 
         radius: Style.cornerRadius
         color: hasCursor ? Style.hoverFillFor(Color.foreground, Color.accent)
@@ -157,6 +158,21 @@ Item {
               }
 
               UiText {
+                visible: model.importance === "high"
+                text: "!"
+                foreground: Color.urgent
+                font.bold: true
+                font.pixelSize: Style.font.caption
+              }
+
+              UiText {
+                visible: model.has_attachments === true
+                text: "\uf0c6"
+                dim: true
+                font.pixelSize: Style.font.caption
+              }
+
+              UiText {
                 text: Fmt.listDate(model.received_at)
                 dim: true
                 font.pixelSize: Style.font.caption
@@ -169,6 +185,27 @@ Item {
               elide: Text.ElideRight
               dim: true
               font.pixelSize: Style.font.bodySmall
+            }
+
+            // Categories / tags, only when the message has any.
+            Row {
+              visible: row.cats.length > 0
+              spacing: Style.spacing.sm
+              Repeater {
+                model: row.cats.slice(0, 4)
+                CategoryChip {
+                  required property var modelData
+                  label: modelData[0]
+                  tint: modelData[1]
+                  maxTextWidth: Style.space(110)
+                }
+              }
+              UiText {
+                visible: row.cats.length > 4
+                text: "+" + (row.cats.length - 4)
+                dim: true
+                font.pixelSize: Style.font.caption
+              }
             }
           }
         }
