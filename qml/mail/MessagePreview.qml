@@ -10,7 +10,17 @@ import "format.js" as Fmt
 Item {
   id: root
 
+  PaneFrame { focused: root.paneFocused; hotkey: "\u2074"; title: "message" }
+
   property var message: null
+  property bool paneFocused: false
+
+  // Keyboard scrolling of the body (the reader pane). Whichever view is showing.
+  function _flick() { return htmlScroll.visible ? htmlScroll.contentItem : scroll.contentItem }
+  function _clamp(f, y) { return Math.max(0, Math.min(Math.max(0, f.contentHeight - f.height), y)) }
+  function scrollBy(px) { var f = _flick(); f.contentY = _clamp(f, f.contentY + px) }
+  function scrollPages(frac) { var f = _flick(); f.contentY = _clamp(f, f.contentY + frac * f.height * 0.9) }
+  function scrollEdge(bottom) { var f = _flick(); f.contentY = bottom ? _clamp(f, 1e9) : 0 }
 
   signal replyRequested()
   signal replyAllRequested()
@@ -81,6 +91,8 @@ Item {
   // ---- message
   ColumnLayout {
     anchors.fill: parent
+    anchors.margins: Style.spacing.sm
+    anchors.topMargin: Style.spacing.xl
     visible: !!root.message
     spacing: 0
 

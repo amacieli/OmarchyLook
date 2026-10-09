@@ -11,6 +11,8 @@ import "format.js" as Fmt
 Item {
   id: root
 
+  PaneFrame { focused: root.paneFocused; hotkey: "\u00b3"; title: root.folderName }
+
   property var model
   property string folderName: "Inbox"
   property string status: ""
@@ -28,7 +30,7 @@ Item {
   implicitWidth: Style.space(360)
 
   ColumnLayout {
-    anchors.fill: parent
+    anchors.fill: parent; anchors.margins: Style.spacing.sm; anchors.topMargin: Style.spacing.xl
     spacing: 0
 
     // ---- header

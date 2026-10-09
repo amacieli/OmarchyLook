@@ -20,6 +20,30 @@ Rectangle {
     property string filter: "all"   // "all" | "active" | "done"
     property int selectedIndex: -1
 
+    // ── keyboard (called by the key registry) ─────────────────────
+    function keyMove(dx, dy) {
+        if (dy === 0) return false
+        var n = filteredTasks().length
+        if (n === 0) return true
+        root.selectedIndex = Math.max(0, Math.min(root.selectedIndex + dy, n - 1))
+        taskList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+        return true
+    }
+    function keyPage(frac) {
+        var n = filteredTasks().length
+        if (n === 0) return
+        var step = Math.max(1, Math.round(taskList.height / 46 * Math.abs(frac))) * (frac < 0 ? -1 : 1)
+        root.selectedIndex = Math.max(0, Math.min(root.selectedIndex + step, n - 1))
+        taskList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+    }
+    function keyEdge(bottom) {
+        var n = filteredTasks().length
+        if (n === 0) return
+        root.selectedIndex = bottom ? n - 1 : 0
+        taskList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+    }
+    function keyActivate() { toggleTask(root.selectedIndex) }
+
     function filteredTasks() {
         if (root.filter === "active") return root.tasks.filter(function(t){ return !t.completed })
         if (root.filter === "done")   return root.tasks.filter(function(t){ return  t.completed })

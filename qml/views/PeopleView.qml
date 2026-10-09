@@ -18,6 +18,15 @@ Rectangle {
         var max = Math.max(0, list.contentHeight - list.height)
         list.contentY = Math.max(0, Math.min(max, list.contentY + dir * list.height * 0.9))
     }
+    // j/k: the list has no cursor, so these scroll it a few lines at a time.
+    function keyMove(dx, dy) {
+        if (dy === 0) return false
+        var max = Math.max(0, list.contentHeight - list.height)
+        list.contentY = Math.max(0, Math.min(max, list.contentY + dy * 60))
+        return true
+    }
+    function keyPage(frac) { pageScroll(frac < 0 ? -Math.abs(frac) / 0.9 : Math.abs(frac) / 0.9) }
+    function keyEdge(bottom) { list.contentY = bottom ? Math.max(0, list.contentHeight - list.height) : 0 }
     color: "#000000"
 
     // ── theme props forwarded from AppShell ───────────────────────

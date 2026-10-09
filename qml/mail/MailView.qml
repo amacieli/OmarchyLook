@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import qs.Commons
 import "../common"
 // Makes Quickshell scan the compose files (they are only loaded on demand, through a Loader).
 import "../compose"
@@ -14,7 +15,12 @@ RowLayout {
   readonly property int pageRows: messages.pageRows
   readonly property bool editing: preview.editing || root.app.composing
 
-  spacing: 0
+  spacing: Style.spacing.sm
+
+  // Reader pane keyboard scrolling (called by the key registry).
+  function scrollReader(px) { preview.scrollBy(px) }
+  function pageReader(frac) { preview.scrollPages(frac) }
+  function readerEdge(bottom) { preview.scrollEdge(bottom) }
 
   MessageList {
     id: messages
@@ -30,8 +36,6 @@ RowLayout {
     onRefreshRequested: { root.app.loadMessages(); root.app.focusRequested() }
   }
 
-  VSeparator { Layout.preferredWidth: 1; Layout.fillHeight: true }
-
   // Compose takes the reading pane's slot. Loaded on demand: the editor needs the native
   // OmarchyLook.Compose plugin, and a Loader keeps a missing plugin from breaking the list.
   Loader {
@@ -40,6 +44,7 @@ RowLayout {
     Layout.fillHeight: true
     active: root.app.composing
     visible: active
+    PaneFrame { focused: true; title: "compose"; visible: composeLoader.active }
     // The message to edit (a reply's recipients and quote, or one taken back with Undo) must be
     // in place when the pane is created, because it fills its fields as it completes. setSource
     // hands the values over at creation; assigning them in onLoaded would be too late.
@@ -72,6 +77,7 @@ RowLayout {
   MessagePreview {
     id: preview
     visible: !root.app.composing
+    paneFocused: root.app.focusPane === "reader"
     Layout.fillWidth: true
     Layout.fillHeight: true
     onReplyRequested: root.app.openCompose("reply")

@@ -10,6 +10,7 @@ import "settings"
 import "views"
 import "state"
 import "common"
+import "keys"
 
 // Window content: wires the state object to the presentational components and
 // owns keyboard dispatch. No styling or backend logic lives here.
@@ -28,53 +29,42 @@ FocusScope {
 
   Component.onCompleted: root.focusKeys()
 
-  PanelKeyCatcher {
+  // ---- keyboard: registry (what each key does) + router (which key, which scope)
+  AppCommands {
+    id: commands
+    app: appState
+    content: contentLoader.item
+    folderPageRows: folderBar.pageRows
+    onPaletteRequested: palette.show()
+    onQuitRequested: root.closeRequested()
+  }
+
+  CommandPalette {
+    id: palette
+    anchors.fill: parent
+    z: 950
+    commands: commands.list
+    scopes: keyCatcher.scopes
+    onClosed: root.focusKeys()
+  }
+
+  KeyRouter {
     id: keyCatcher
     anchors.fill: parent
+    commands: commands.list
+
+    // Innermost first: the pane, "<view>/<pane>", the view, then everything.
+    readonly property string paneScope: appState.focusPane === "msg" ? "list" : appState.focusPane
+    scopes: [paneScope, appState.currentView + "/" + paneScope, appState.currentView, "global"]
 
     // Hand keys to text inputs / popups while they own focus.
-    blocked: topBar.searchFocused || settingsEditing || appState.auth.showModal
+    blocked: topBar.searchFocused || settingsEditing || appState.auth.showModal || palette.open
 
-    // A page (settings fields, the mail view's image dropdown) owns the keyboard.
+    // A page (settings fields, the mail view's image dropdown, compose) owns the keyboard.
     readonly property bool settingsEditing: contentLoader.item && contentLoader.item.editing === true
 
-    onMoveRequested: function(dx, dy) { appState.moveCursor(dx, dy) }
-    onActivateRequested: appState.activate()
-    onCloseRequested: appState.back()
-    onTextKey: function(t) {
-      if (t === "s") appState.cycleFocus()
-      else if (appState.currentView === "mail" && !appState.composing) {
-        if (t === "c") appState.openCompose("new")
-        else if (t === "r") appState.openCompose("reply")
-        else if (t === "a") appState.openCompose("replyAll")
-        else if (t === "f") appState.openCompose("forward")
-      }
-      // `u` takes back the message that is still inside its send delay.
-      if (t === "u" && !appState.composing) appState.undoLatest()
-    }
-
-    // PageUp/PageDown move the cursor a screenful in the pane that has it. Qt's
-    // `Keys` has no page-key signal, so these are Shortcuts, switched off while a
-    // text field or the auth modal owns the keyboard (`blocked`).
-    function page(dir) {
-      var v = appState.currentView
-      if (v === "contacts") {
-        if (contentLoader.item && contentLoader.item.pageScroll) contentLoader.item.pageScroll(dir)
-      } else if (appState.focusPane === "folder") {
-        appState.moveVertical(dir * folderBar.pageRows)
-      } else if (appState.focusPane === "msg" && v === "mail") {
-        appState.moveVertical(dir * (contentLoader.item ? contentLoader.item.pageRows : 1))
-      }
-    }
-
-    Shortcut { sequences: ["Ctrl+N"]; enabled: appState.currentView === "mail" && !appState.composing; onActivated: appState.openCompose("new") }
-    Shortcut { sequences: ["PgUp"];   enabled: !keyCatcher.blocked; onActivated: keyCatcher.page(-1) }
-    Shortcut { sequences: ["PgDown"]; enabled: !keyCatcher.blocked; onActivated: keyCatcher.page(1) }
-
     // Esc must still dismiss the auth modal even though `blocked` is set.
-    Keys.priority: Keys.BeforeItem
     Keys.onEscapePressed: function(event) {
-      // Specific key handlers accept by default; only swallow Esc for the modal.
       event.accepted = appState.auth.showModal
       if (event.accepted) appState.auth.cancel()
     }
@@ -97,7 +87,8 @@ FocusScope {
       RowLayout {
         Layout.fillWidth: true
         Layout.fillHeight: true
-        spacing: 0
+        Layout.margins: Style.spacing.sm
+        spacing: Style.spacing.sm
 
         NavBar {
           Layout.preferredWidth: implicitWidth
@@ -110,8 +101,6 @@ FocusScope {
           onItemClicked: function(i) { appState.clickNav(i) }
           onToggleClicked: appState.clickNavToggle()
         }
-
-        VSeparator { Layout.preferredWidth: 1; Layout.fillHeight: true }
 
         FolderBar {
           id: folderBar
@@ -126,21 +115,34 @@ FocusScope {
           onRefreshRequested: { appState.loadFolders(); appState.focusRequested() }
         }
 
-        VSeparator { visible: appState.currentView === "mail"; Layout.preferredWidth: 1; Layout.fillHeight: true }
-
-        Loader {
-          id: contentLoader
+        // Mail draws its own two frames (list, reader); every other view is one pane.
+        Item {
           Layout.fillWidth: true
           Layout.fillHeight: true
-          sourceComponent: {
-            switch (appState.currentView) {
-              case "settings": return settingsComponent
-              case "calendar": return calendarComponent
-              case "contacts": return peopleComponent
-              case "tasks":    return tasksComponent
-              case "sms":      return smsComponent
-              default:         return mailComponent
+
+          Loader {
+            id: contentLoader
+            anchors.fill: parent
+            // Non-mail views sit inside the frame; mail's panes draw their own.
+            anchors.margins: appState.currentView === "mail" ? 0 : 2
+            anchors.topMargin: appState.currentView === "mail" ? 0 : Style.spacing.xl
+            sourceComponent: {
+              switch (appState.currentView) {
+                case "settings": return settingsComponent
+                case "calendar": return calendarComponent
+                case "contacts": return peopleComponent
+                case "tasks":    return tasksComponent
+                case "sms":      return smsComponent
+                default:         return mailComponent
+              }
             }
+          }
+
+          PaneFrame {
+            visible: appState.currentView !== "mail"
+            focused: appState.focusPane === "msg"
+            hotkey: "\u00b2"
+            title: appState.currentViewLabel
           }
         }
       }
@@ -156,6 +158,9 @@ FocusScope {
         unreadCount: appState.unreadCount
         focusPane: appState.focusPane
         currentView: appState.currentView
+        pendingText: keyCatcher.pendingText
+        pendingOptions: keyCatcher.pendingOptions
+        notice: commands.notice
       }
     }
 

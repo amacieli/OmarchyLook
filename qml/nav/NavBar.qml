@@ -2,11 +2,14 @@ import QtQuick
 import QtQuick.Layouts
 import qs.Commons
 import qs.Ui
+import "../common"
 
 // Left menu bar. Presentational: owns no state, reports clicks via signals.
 //   items: [{ icon, label, view, pinned? }]  (pinned items sit at the bottom)
 Item {
   id: root
+
+  PaneFrame { focused: root.paneFocused; hotkey: "\u00b9"; title: root.expanded ? "menu" : "" }
 
   property var items: []
   property int currentIndex: 0
@@ -35,7 +38,7 @@ Item {
   }
 
   ColumnLayout {
-    anchors.fill: parent
+    anchors.fill: parent; anchors.topMargin: Style.spacing.lg
     anchors.margins: Style.spacing.md
     spacing: Style.spacing.xs
 

@@ -1,0 +1,57 @@
+.pragma library
+
+// Pure chord/scope resolution, kept free of QML types so it can be tested with node.
+//
+//   command: { id, title, scope, keys: ["j", "g g", "C-d"], run(), when?(), hidden? }
+//   scopes:  innermost first, e.g. ["list", "mail/list", "mail", "global"]
+//   seq:     tokens typed so far, e.g. ["g"]
+//
+// Returns { exact, prefixes }. `exact` is the innermost command bound to the whole
+// sequence; `prefixes` are { cmd, next } for commands that continue it.
+function resolve(commands, scopes, seq) {
+  var key = seq.join(" ")
+  var exact = null
+  var prefixes = []
+  for (var s = 0; s < scopes.length; s++) {
+    for (var i = 0; i < commands.length; i++) {
+      var c = commands[i]
+      if (c.scope !== scopes[s]) continue
+      if (c.when && !c.when()) continue
+      for (var k = 0; k < c.keys.length; k++) {
+        var bound = c.keys[k]
+        if (bound === key) { if (!exact) exact = c }
+        else if (bound.indexOf(key + " ") === 0) prefixes.push({ cmd: c, next: bound.slice(key.length + 1) })
+      }
+    }
+  }
+  return { exact: exact, prefixes: prefixes }
+}
+
+// Commands that apply in `scopes`, one entry per id (innermost wins), for help/palette.
+function applicable(commands, scopes) {
+  var seen = {}
+  var out = []
+  for (var s = 0; s < scopes.length; s++) {
+    for (var i = 0; i < commands.length; i++) {
+      var c = commands[i]
+      if (c.scope !== scopes[s] || c.hidden || seen[c.id]) continue
+      if (c.when && !c.when()) continue
+      seen[c.id] = true
+      out.push(c)
+    }
+  }
+  return out
+}
+
+// Subsequence match: every character of `query` appears in `text` in order.
+function fuzzy(query, text) {
+  var q = query.toLowerCase().replace(/\s+/g, "")
+  var t = text.toLowerCase()
+  var j = 0
+  for (var i = 0; i < t.length && j < q.length; i++) if (t[i] === q[j]) j++
+  return j === q.length
+}
+
+function keyLabel(keys) {
+  return keys.map(function(k) { return k.replace(/^C-/, "Ctrl-").replace(/^S-/, "Shift-") }).join("  ")
+}

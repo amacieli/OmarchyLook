@@ -8,6 +8,8 @@ import "../common"
 Item {
   id: root
 
+  PaneFrame { focused: root.paneFocused; hotkey: "\u00b2"; title: "folders" }
+
   property var model
   property int currentIndex: 0
   property string selectedId: ""
@@ -42,8 +44,7 @@ Item {
   clip: true
 
   ColumnLayout {
-    anchors.fill: parent
-    anchors.margins: Style.spacing.md
+    anchors.fill: parent; anchors.margins: Style.spacing.md; anchors.topMargin: Style.spacing.xl
     spacing: Style.spacing.sm
 
     RowLayout {

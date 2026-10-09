@@ -190,7 +190,16 @@ Item {
   property var _bodyOrder: []
 
   readonly property string currentMessageId: currentMessage ? String(currentMessage.id || "") : ""
-  onCurrentMessageIdChanged: loadBody(currentMessageId)
+  // Debounced: holding j/k (or gg/G) changes the selection many times a second, and each
+  // uncached message would start a fetch plus a rich-text layout (OL-001). Cached bodies
+  // show at once; everything else waits until the cursor has rested for 120 ms.
+  onCurrentMessageIdChanged: {
+    var id = currentMessageId
+    if (id === "" || _bodyCache[id]) { _bodyDebounce.stop(); loadBody(id); return }
+    currentBody = { id: id, state: "loading", type: "", content: "" }
+    _bodyDebounce.restart()
+  }
+  Timer { id: _bodyDebounce; interval: 120; onTriggered: root.loadBody(root.currentMessageId) }
 
   function loadBody(id) {
     if (id === "") { currentBody = { id: "", state: "idle", type: "", content: "" }; return }
@@ -319,7 +328,7 @@ Item {
   }
 
   signal focusRequested()   // ask the shell to put keyboard focus back on the key catcher
-  signal closeRequested()   // Esc pressed at the top level
+  signal closeRequested()   // `Q` / `:q` — close the window
 
   ListModel { id: folderModelObj }
   ListModel { id: messageModelObj }
@@ -924,17 +933,65 @@ Item {
       selectFolderAt(folderIndex)
       focusPane = "msg"
       msgIndex = 0
+    } else if (focusPane === "msg" && currentView === "mail" && currentMessage) {
+      focusPane = "reader"
     }
   }
 
   function activate() { moveInto() }
 
-  // `h` / Esc: one pane to the left. At the top level Esc closes the window,
-  // `h` does nothing.
-  function back(isH) {
-    if (focusPane === "msg") focusPane = currentView === "mail" ? "folder" : "nav"
+  // `h` / Esc: one pane to the left. Never closes the window (that is `Q`).
+  function back() {
+    if (focusPane === "reader") focusPane = "msg"
+    else if (focusPane === "msg") focusPane = currentView === "mail" ? "folder" : "nav"
     else if (focusPane === "folder") focusPane = "nav"
-    else if (!isH) closeRequested()
+  }
+
+  // Panes that exist in the current view, left to right.
+  function panesInView() {
+    return currentView === "mail" ? ["nav", "folder", "msg", "reader"] : ["nav", "msg"]
+  }
+
+  // Put the cursor in `pane` (no-op if the view has no such pane). Entering the
+  // message list from outside resets nothing, so the cursor stays where it was.
+  function focusPaneNamed(pane) {
+    if (panesInView().indexOf(pane) < 0) return
+    if (pane === "folder") folderIndex = Math.max(0, folderIndex)
+    if (pane === "reader" && !currentMessage) return
+    if (pane === "msg" && currentView !== "mail" && focusPane === "nav") msgIndex = 0
+    navOnToggle = false
+    focusPane = pane
+  }
+
+  // Tab / Shift-Tab.
+  function cyclePane(dir) {
+    var panes = panesInView()
+    var i = panes.indexOf(focusPane)
+    if (i < 0) i = 0
+    for (var n = 1; n <= panes.length; n++) {
+      var next = panes[(i + dir * n + panes.length * n) % panes.length]
+      if (next === "reader" && !currentMessage) continue
+      focusPaneNamed(next)
+      return
+    }
+  }
+
+  // Jump to the first/last entry in the nav bar.
+  function navEdge(bottom) {
+    navOnToggle = false
+    setNavIndex(bottom ? navItems.length - 1 : 0)
+  }
+
+  // `g` + letter: go to a module and land in its main pane.
+  function gotoView(view) {
+    for (var i = 0; i < navItems.length; i++) {
+      if (navItems[i].view !== view) continue
+      setNavIndex(i)
+      navOnToggle = false
+      if (view !== "mail") msgIndex = 0
+      focusPane = "msg"
+      return
+    }
   }
 
   // `s`: cycle nav -> folder/list -> nav.

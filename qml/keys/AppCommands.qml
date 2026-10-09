@@ -1,0 +1,159 @@
+import QtQuick
+
+// The command registry: every key binding in the app, in one place. The router,
+// the palette and the status-bar hints all read `list`, so they cannot drift from
+// what the keys really do. Commands call AppState intents; no backend logic here.
+//
+// Scopes, innermost first (built in AppShell): pane ("nav" | "folder" | "list" |
+// "reader"), "<view>/<pane>", "<view>", "global".
+Item {
+  id: root
+
+  required property var app
+  property var content: null            // the active view item (MailView, TasksView, …)
+  property int folderPageRows: 1
+
+  signal paletteRequested()
+  signal quitRequested()
+
+  // One-line feedback for keys that cannot act yet. Shown in the bottom status bar.
+  property string notice: ""
+  Timer { id: noticeTimer; interval: 3000; onTriggered: root.notice = "" }
+  function say(text) { notice = text; noticeTimer.restart() }
+
+  readonly property bool inMail: app.currentView === "mail"
+
+  // The active non-mail view while the cursor is in its main pane, else null.
+  function mod() {
+    return (app.focusPane === "msg" && !inMail && app.currentView !== "settings") ? content : null
+  }
+
+  // ---- motion -----------------------------------------------------------
+  function move(dx, dy) {
+    var m = mod()
+    if (m && m.keyMove && m.keyMove(dx, dy) === true) return
+    if (app.focusPane === "reader") {
+      if (dy !== 0 && content) content.scrollReader(dy * 60)
+      else if (dx < 0) app.back()
+      return
+    }
+    app.moveCursor(dx, dy)
+  }
+
+  function pageRows() {
+    if (app.focusPane === "folder") return folderPageRows
+    if (app.focusPane === "msg" && inMail && content) return content.pageRows
+    return 1
+  }
+
+  // dir: +1 down / -1 up; frac: 1 = a screenful, 0.5 = half.
+  function page(dir, frac) {
+    var p = app.focusPane
+    if (p === "reader") { if (content) content.pageReader(dir * frac); return }
+    var m = mod()
+    if (m) {
+      if (m.keyPage) m.keyPage(dir * frac)
+      else if (m.pageScroll) m.pageScroll(dir)
+      return
+    }
+    if (p === "folder" || p === "msg") app.moveVertical(dir * Math.max(1, Math.round(pageRows() * frac)))
+  }
+
+  function edge(bottom) {
+    var p = app.focusPane
+    if (p === "nav") { app.navEdge(bottom); return }
+    if (p === "reader") { if (content) content.readerEdge(bottom); return }
+    var m = mod()
+    if (m) { if (m.keyEdge) m.keyEdge(bottom); return }
+    app.moveVertical(bottom ? 1000000 : -1000000)
+  }
+
+  function activate() {
+    var m = mod()
+    if (m && m.keyActivate) m.keyActivate()
+    else app.activate()
+  }
+
+  function deleteItem() {
+    var m = mod()
+    if (m && m.keyDelete) m.keyDelete()
+    else say("delete: not available here yet")
+  }
+
+  function soon(what) { return function() { say(what + ": not implemented yet") } }
+
+  // ---- registry ---------------------------------------------------------
+  readonly property var list: [
+    // motion (global; reader/module scopes override where they differ)
+    { id: "move.down",  title: "Move down",           scope: "global", keys: ["j", "Down"],  run: function() { move(0, 1) } },
+    { id: "move.up",    title: "Move up",             scope: "global", keys: ["k", "Up"],    run: function() { move(0, -1) } },
+    { id: "move.left",  title: "Back one pane",       scope: "global", keys: ["h", "Left"],  run: function() { move(-1, 0) } },
+    { id: "move.right", title: "Open / move right",   scope: "global", keys: ["l", "Right"], run: function() { move(1, 0) } },
+    { id: "move.top",   title: "Jump to top",         scope: "global", keys: ["g g", "Home"], run: function() { edge(false) } },
+    { id: "move.bottom", title: "Jump to bottom",     scope: "global", keys: ["G", "End"],   run: function() { edge(true) } },
+    { id: "page.down",  title: "Page down",           scope: "global", keys: ["PgDown"],     run: function() { page(1, 1) } },
+    { id: "page.up",    title: "Page up",             scope: "global", keys: ["PgUp"],       run: function() { page(-1, 1) } },
+    { id: "half.down",  title: "Half page down",      scope: "global", keys: ["C-d"],        run: function() { page(1, 0.5) } },
+    { id: "half.up",    title: "Half page up",        scope: "global", keys: ["C-u"],        run: function() { page(-1, 0.5) } },
+    { id: "item.activate", title: "Open / activate",  scope: "global", keys: ["Enter", "Space"], run: function() { activate() } },
+    { id: "item.delete",   title: "Delete",           scope: "global", keys: ["x"],          run: function() { deleteItem() } },
+
+    // panes
+    { id: "pane.next",  title: "Next pane",           scope: "global", keys: ["Tab"],        run: function() { app.cyclePane(1) } },
+    { id: "pane.prev",  title: "Previous pane",       scope: "global", keys: ["S-Tab"],      run: function() { app.cyclePane(-1) } },
+    { id: "pane.cycle", title: "Cycle pane (old key)", scope: "global", keys: ["s"], hidden: true, run: function() { app.cycleFocus() } },
+    { id: "pane.back",  title: "Back / cancel",       scope: "global", keys: ["Esc"],        run: function() { app.back() } },
+    { id: "pane.nav",     title: "Focus navigation",  scope: "global", keys: ["1"],          run: function() { app.focusPaneNamed("nav") } },
+    { id: "pane.folders", title: "Focus folders",     scope: "mail",   keys: ["2"],          run: function() { app.focusPaneNamed("folder") } },
+    { id: "pane.list",    title: "Focus list",        scope: "mail",   keys: ["3"],          run: function() { app.focusPaneNamed("msg") } },
+    { id: "pane.reader",  title: "Focus reading pane", scope: "mail",  keys: ["4"],          run: function() { app.focusPaneNamed("reader") } },
+    { id: "pane.list2",   title: "Focus list",        scope: "global", keys: ["2"], hidden: true, when: function() { return !inMail }, run: function() { app.focusPaneNamed("msg") } },
+    { id: "view.close", title: "Back to navigation",  scope: "global", keys: ["q"],          run: function() { app.focusPaneNamed("nav") } },
+    { id: "app.quit",   title: "Quit OmarchyLook",    scope: "global", keys: ["Q"],          run: function() { root.quitRequested() } },
+
+    // go to a module
+    { id: "go.mail",     title: "Go to Mail",     scope: "global", keys: ["g m"], run: function() { app.gotoView("mail") } },
+    { id: "go.calendar", title: "Go to Calendar", scope: "global", keys: ["g c"], run: function() { app.gotoView("calendar") } },
+    { id: "go.people",   title: "Go to People",   scope: "global", keys: ["g p"], run: function() { app.gotoView("contacts") } },
+    { id: "go.tasks",    title: "Go to Tasks",    scope: "global", keys: ["g t"], run: function() { app.gotoView("tasks") } },
+    { id: "go.sms",      title: "Go to SMS",      scope: "global", keys: ["g s"], run: function() { app.gotoView("sms") } },
+    { id: "go.settings", title: "Go to Settings", scope: "global", keys: ["g ,"], run: function() { app.gotoView("settings") } },
+
+    // command list
+    { id: "palette",    title: "Show commands",   scope: "global", keys: [":", "C-p", "?"], run: function() { root.paletteRequested() } },
+
+    // reader
+    { id: "reader.pagedown", title: "Scroll page down", scope: "reader", keys: ["Space"], run: function() { page(1, 1) } },
+    { id: "reader.pageup",   title: "Scroll page up",   scope: "reader", keys: ["b"],     run: function() { page(-1, 1) } },
+
+    // mail
+    { id: "mail.new",      title: "New message",   scope: "mail", keys: ["c", "C-n"], run: function() { app.openCompose("new") } },
+    { id: "mail.reply",    title: "Reply",         scope: "mail", keys: ["r"], run: function() { app.openCompose("reply") } },
+    { id: "mail.replyall", title: "Reply all",     scope: "mail", keys: ["R"], run: function() { app.openCompose("replyAll") } },
+    { id: "mail.forward",  title: "Forward",       scope: "mail", keys: ["f"], run: function() { app.openCompose("forward") } },
+    { id: "mail.read",     title: "Mark read / unread", scope: "mail", keys: ["z"], run: function() { app.toggleRead() } },
+    { id: "mail.archive",  title: "Archive",       scope: "mail", keys: ["a"], run: soon("archive") },
+    { id: "mail.undosend", title: "Undo send",     scope: "mail", keys: ["u"], run: function() { app.undoLatest() } },
+
+    // calendar
+    { id: "cal.next",  title: "Next period",     scope: "calendar/list", keys: ["j", "Down", "]"], run: function() { content.step(1) } },
+    { id: "cal.prev",  title: "Previous period", scope: "calendar/list", keys: ["k", "Up", "["],   run: function() { content.step(-1) } },
+    { id: "cal.today", title: "Go to today",     scope: "calendar/list", keys: ["t"], run: function() { content.goToday() } },
+    { id: "cal.day",   title: "Day view",        scope: "calendar/list", keys: ["d"], run: function() { content.mode = "day" } },
+    { id: "cal.work",  title: "Work week view",  scope: "calendar/list", keys: ["W"], run: function() { content.mode = "workweek" } },
+    { id: "cal.week",  title: "Week view",       scope: "calendar/list", keys: ["w"], run: function() { content.mode = "week" } },
+    { id: "cal.month", title: "Month view",      scope: "calendar/list", keys: ["m"], run: function() { content.mode = "month" } },
+    { id: "cal.refresh", title: "Refresh events", scope: "calendar/list", keys: ["r"], run: function() { content.loadEvents(true) } },
+    { id: "cal.new",   title: "New event",       scope: "calendar/list", keys: ["c"], run: soon("new event") },
+
+    // people
+    { id: "people.refresh", title: "Refresh contacts", scope: "contacts/list", keys: ["r"], run: function() { content.load() } },
+    { id: "people.new",     title: "New contact",      scope: "contacts/list", keys: ["c"], run: soon("new contact") },
+
+    // tasks
+    { id: "tasks.filter",  title: "Cycle filter (all / active / done)", scope: "tasks/list", keys: ["f"], run: function() {
+        content.filter = content.filter === "all" ? "active" : (content.filter === "active" ? "done" : "all") } },
+    { id: "tasks.refresh", title: "Refresh tasks", scope: "tasks/list", keys: ["r"], run: function() { content.loadTasks() } },
+    { id: "tasks.new",     title: "New task",      scope: "tasks/list", keys: ["c"], run: soon("new task") }
+  ]
+}
