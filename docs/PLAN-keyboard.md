@@ -11,7 +11,7 @@ Outlook IA). Status: **plan only, nothing built.** Decisions settled in §6.
 | Pane model | `focusPane` = nav → folder → msg. `h`/`l` move between panes, `s` cycles. **Reading pane cannot take focus** (no keyboard scroll of a message) | `AppState.qml:892-945` |
 | Mail keys | `c` new, `r` reply, `a` reply-all, `f` forward, `u` undo-send, `Ctrl+N` new, PgUp/PgDn page | `AppShell.qml:44-72` |
 | Read/unread | `toggleRead()` exists but only a click button calls it — no key | `MailView.qml:81` |
-| Search | Top bar field exists, **not wired** to any backend endpoint | `TopStatusBar.qml:46` |
+| Search | (top bar and its box removed in Phase 5; not implemented) | — |
 | Delete/archive/move/tag | **No backend.** Only `POST /messages/read`. `delete_email` in `mail_list_bridge.rs` is local-cache only | `src/main.rs:634` |
 | Other modules | Calendar, People, Tasks, SMS have **no key handling**; `l` into them does nothing (`moveInto` only handles nav/folder) | `qml/views/*` |
 | Compose | Own `Keys.onPressed`: Ctrl+Enter send, Ctrl+B/I/U/K, Esc. Modal — fine | `ComposeView.qml:124` |
@@ -99,7 +99,7 @@ Outlook IA). Status: **plan only, nothing built.** Decisions settled in §6.
       `x` = run queued/bulk only if the queued-action model in Q6 is chosen.
 - [ ] Folder picker (move) = palette in "folder" mode.
 
-### Phase 5 — Search (`/`, `n`, `N`)
+### Phase 5 — Search (`/`, `n`, `N`) — DEFERRED; instead (2026-10-09) the top bar and its search box were removed
 - [ ] Backend `GET /messages/search?q=` (local SQLite FTS first; provider search later).
 - [ ] `/` focuses top-bar search; Enter → results become the list; `n/N` next/prev match; Esc clears.
 - [ ] Decide scope: current folder / all folders (palette option `:search -a`).
@@ -155,3 +155,9 @@ Outlook IA). Status: **plan only, nothing built.** Decisions settled in §6.
   and, with several accounts, the account. Pane numbers follow what is on screen.
 - Tests: db `queued_actions_*`, models `message_action_tests`; node `tests/commands.test.js`.
 - Not verified: an actual archive/trash/move/delete reaching Graph or Gmail (only queue + undo were exercised on the live mailbox).
+
+## 8. Phase 5 as done
+- Top bar removed (title, search box, backend icon, account button). Its jobs: view/folder and online/offline were already in the bottom
+  status bar; the account button became `g a` / `:accounts` (Settings → Accounts) and the bottom bar shows `signed out (g a accounts)` when
+  not signed in; search stays the `:search` stub. No search was implemented (no `/` key, no endpoint). The 1 px rule under the bar went too.
+- Search, when it comes back: `/` opens a search prompt (not a permanent box), results replace the list, `n`/`N` step through, Esc clears.

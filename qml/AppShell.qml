@@ -78,7 +78,7 @@ FocusScope {
     }
 
     // Hand keys to text inputs / popups while they own focus.
-    blocked: topBar.searchFocused || settingsEditing || appState.auth.showModal || palette.open || help.open
+    blocked: settingsEditing || appState.auth.showModal || palette.open || help.open
 
     // A page (settings fields, the mail view's image dropdown, compose) owns the keyboard.
     readonly property bool settingsEditing: contentLoader.item && contentLoader.item.editing === true
@@ -92,17 +92,6 @@ FocusScope {
     ColumnLayout {
       anchors.fill: parent
       spacing: 0
-
-      TopStatusBar {
-        id: topBar
-        Layout.fillWidth: true
-        backendOnline: appState.backendOnline
-        isAuthenticated: appState.auth.isAuthenticated
-        viewLabel: appState.currentViewLabel
-        onAccountClicked: appState.openSettingsCategory("account")
-      }
-
-      PanelSeparator { Layout.fillWidth: true }
 
       RowLayout {
         Layout.fillWidth: true
@@ -172,6 +161,7 @@ FocusScope {
       BottomStatusBar {
         Layout.fillWidth: true
         backendOnline: appState.backendOnline
+        isAuthenticated: appState.auth.isAuthenticated
         viewLabel: appState.currentViewLabel
         folderName: appState.selectedFolderName
         messageCount: appState.messageTotal

@@ -9,6 +9,7 @@ Item {
   id: root
 
   property bool backendOnline: false
+  property bool isAuthenticated: true
   property string viewLabel: ""
   property string folderName: ""
   property int messageCount: 0
@@ -91,6 +92,14 @@ Item {
     UiText {
       text: "  " + (root.keyOf("palette") || ":") + "  commands   " + (root.keyOf("help") || "?") + "  help"
       color: Color.accent
+      font.pixelSize: Style.font.caption
+      font.bold: true
+    }
+
+    UiText {
+      visible: !root.isAuthenticated
+      text: "signed out (" + (root.keyOf("go.accounts") || "g a") + " accounts)"
+      color: Color.urgent
       font.pixelSize: Style.font.caption
       font.bold: true
     }

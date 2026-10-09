@@ -186,6 +186,7 @@ Item {
     { id: "go.tasks",    title: "Go to Tasks",    scope: "global", keys: ["g t"], run: function() { app.gotoView("tasks") } },
     { id: "go.sms",      title: "Go to SMS",      scope: "global", keys: ["g s"], run: function() { app.gotoView("sms") } },
     { id: "go.settings", title: "Go to Settings", scope: "global", keys: ["g ,"], ex: ["settings"], run: function() { app.gotoView("settings") } },
+    { id: "go.accounts", title: "Go to Accounts", scope: "global", keys: ["g a"], ex: ["accounts", "account"], run: function() { app.openSettingsCategory("account") } },
     { id: "go.any",      title: "Go to…",         scope: "global", keys: [], ex: ["goto", "go"], pick: pickModules, run: function() { app.gotoView("mail") } },
     { id: "go.folder",   title: "Go to folder…",  scope: "global", keys: ["g f"], ex: ["folder"], pick: pickFolders, run: function() { root.paletteRequested("folder ") } },
 
