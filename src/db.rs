@@ -27,6 +27,16 @@ pub enum SenderAdd {
     Invalid,
 }
 
+/// `["A","B"]` as stored in `messages.categories`; `None` stays NULL (not fetched).
+pub fn categories_json(c: &Option<Vec<String>>) -> Option<String> {
+    c.as_ref().map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
+}
+
+/// Inverse of `categories_json` (NULL or garbage -> empty).
+pub fn categories_from_json(s: Option<&str>) -> Vec<String> {
+    s.and_then(|t| serde_json::from_str::<Vec<String>>(t).ok()).unwrap_or_default()
+}
+
 pub struct Database {
     conn: Connection,
     /// Account that rows written through this handle belong to.
@@ -197,6 +207,59 @@ impl Database {
             )?;
         }
 
+        // Message details beyond the list basics (To/Cc/Bcc, sender name, categories, sent time,
+        // importance, attachments, conversation). `meta_ok` = 0 marks rows stored before these
+        // existed: the one-time repopulate fills them and sets it to 1.
+        // categories: JSON array of names. categories_synced: what the provider last said.
+        // cat_pending: a local category change not yet pushed.
+        let had_meta = self.conn
+            .query_row("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='meta_ok'", [], |r| r.get::<_, i32>(0))
+            .unwrap_or(0) > 0;
+        for (col, decl) in [
+            ("to_text", "TEXT"), ("cc_text", "TEXT"), ("bcc_text", "TEXT"),
+            ("categories", "TEXT"), ("categories_synced", "TEXT"), ("cat_pending", "INTEGER NOT NULL DEFAULT 0"),
+            ("sent_at", "TEXT"), ("importance", "TEXT"), ("has_attachments", "INTEGER"),
+            ("conversation_id", "TEXT"), ("meta_ok", "INTEGER NOT NULL DEFAULT 0"),
+        ] {
+            let has: bool = self.conn
+                .query_row("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name = ?1", [col], |row| row.get::<_, i32>(0))
+                .unwrap_or(0) > 0;
+            if !has {
+                self.conn.execute(&format!("ALTER TABLE messages ADD COLUMN {} {}", col, decl), [])?;
+            }
+        }
+        if !had_meta {
+            // The update trigger used to re-index from_name too; filling in names for every
+            // row would re-index (a full scan each) tens of thousands of times.
+            self.conn.execute("DROP TRIGGER IF EXISTS messages_au", [])?;
+            self.create_messages_au_trigger()?;
+        }
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_meta ON messages(meta_ok)", [])?;
+        // Categories (Exchange) / user labels (Gmail) per account, with their colours.
+        // `pending` = created here, not yet on the provider.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS category_defs (
+                account_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                color TEXT NOT NULL,
+                provider_color TEXT,
+                pending INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (account_id, name)
+            )", [])?;
+
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS account_flags (
+                account_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                PRIMARY KEY (account_id, key)
+            )", [])?;
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS category_state (
+                account_id TEXT PRIMARY KEY,
+                master_list INTEGER NOT NULL DEFAULT 1
+            )", [])?;
+
         // action_pending / action_due: archive, delete or move chosen in the UI. The row is hidden
         // from lists at once; the daemon pushes it to the provider once `action_due` (unix secs,
         // end of the undo window) has passed.
@@ -337,7 +400,7 @@ impl Database {
             // Only the indexed columns: read flags, folder and account changes must not
             // touch the index (it has no usable key, so each re-index is a full scan).
             "CREATE TRIGGER IF NOT EXISTS messages_au
-             AFTER UPDATE OF subject, from_email, from_name, body ON messages BEGIN
+             AFTER UPDATE OF subject, from_email, body ON messages BEGIN
                 DELETE FROM messages_fts WHERE id = old.id;
                 INSERT INTO messages_fts(id, subject, from_email, from_name, body)
                 VALUES (new.id, new.subject, new.from_email, new.from_name, new.body);
@@ -1022,6 +1085,199 @@ impl Database {
         Ok(())
     }
 
+    // ───────────────────────── message details & categories ─────────────────────────
+
+    /// Fill in the detail fields of an already stored message (the one-time repopulate for
+    /// providers without a change feed). Never touches a category change that is still
+    /// waiting to be pushed.
+    pub fn update_message_meta(&self, e: &EmailMessage) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE messages SET from_name = ?1, to_text = ?2, cc_text = ?3, bcc_text = ?4,
+                    categories = CASE WHEN cat_pending = 1 THEN categories ELSE ?5 END,
+                    categories_synced = ?5, sent_at = ?6, importance = ?7, has_attachments = ?8,
+                    conversation_id = ?9, meta_ok = 1
+             WHERE id = ?10",
+            params![e.from_name, e.to_text, e.cc_text, e.bcc_text, categories_json(&e.categories),
+                    e.sent_at, e.importance, e.has_attachments, e.conversation_id, e.id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Ids (newest first) of this account's messages still waiting for the detail repopulate.
+    pub fn messages_needing_meta(&self, limit: usize) -> Result<Vec<(String, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, folder_id FROM messages WHERE account_id = ?1 AND meta_ok = 0
+             ORDER BY received_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![self.account_id, limit as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// How many of this account's messages still lack their details.
+    pub fn meta_remaining(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE account_id = ?1 AND meta_ok = 0",
+            params![self.account_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Forget every folder's change-feed position so the next sync walks each folder again
+    /// (the stored links carry the old field list, so only a fresh walk brings the new fields).
+    pub fn reset_all_delta_states(&self) -> Result<usize> {
+        Ok(self.conn.execute("DELETE FROM mail_delta WHERE account_id = ?1", params![self.account_id])?)
+    }
+
+    /// One-time markers per account (e.g. "the change feeds were reset for the new fields").
+    pub fn flag_is_set(&self, key: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM account_flags WHERE account_id = ?1 AND key = ?2)",
+            params![self.account_id, key],
+            |r| r.get::<_, bool>(0),
+        )?)
+    }
+
+    pub fn set_flag(&self, key: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO account_flags (account_id, key) VALUES (?1, ?2)",
+            params![self.account_id, key],
+        )?;
+        Ok(())
+    }
+
+    /// Folders whose change-feed walk has not finished (never started, or still paging).
+    pub fn delta_walk_incomplete(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM folders f
+             LEFT JOIN mail_delta d ON d.account_id = f.account_id AND d.folder_id = f.id
+             WHERE f.account_id = ?1 AND (d.folder_id IS NULL OR d.complete = 0)",
+            params![self.account_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Add or remove `name` on each message (local edit, pushed to the provider later).
+    /// Returns how many messages changed.
+    pub fn change_message_categories(&self, ids: &[String], add: bool, name: &str) -> Result<usize> {
+        let mut changed = 0;
+        for id in ids {
+            let cur: Option<Option<String>> = self.conn
+                .query_row("SELECT categories FROM messages WHERE id = ?1", params![id], |r| r.get::<_, Option<String>>(0))
+                .optional()?;
+            let Some(cur) = cur else { continue };
+            let mut list = categories_from_json(cur.as_deref());
+            let had = list.iter().any(|c| c.eq_ignore_ascii_case(name));
+            if add && !had { list.push(name.to_string()); }
+            else if !add && had { list.retain(|c| !c.eq_ignore_ascii_case(name)); }
+            else { continue }
+            self.conn.execute(
+                "UPDATE messages SET categories = ?1, cat_pending = 1 WHERE id = ?2",
+                params![serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()), id],
+            )?;
+            changed += 1;
+        }
+        Ok(changed)
+    }
+
+    /// Category changes not yet pushed: (id, wanted names, names the provider last had).
+    pub fn pending_category_pushes(&self) -> Result<Vec<(String, Vec<String>, Vec<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, categories, categories_synced FROM messages WHERE cat_pending = 1 AND account_id = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![self.account_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, want, had)| (id, categories_from_json(want.as_deref()), categories_from_json(had.as_deref())))
+            .collect())
+    }
+
+    /// The provider took `pushed` for this message. The change stays pending if the user has
+    /// edited the categories again in the meantime.
+    pub fn finish_category_push(&self, id: &str, pushed: &[String]) -> Result<()> {
+        let json = serde_json::to_string(pushed).unwrap_or_else(|_| "[]".into());
+        self.conn.execute(
+            "UPDATE messages SET categories_synced = ?1,
+                    cat_pending = CASE WHEN categories = ?1 THEN 0 ELSE 1 END
+             WHERE id = ?2",
+            params![json, id],
+        )?;
+        Ok(())
+    }
+
+    // ───────────────────────── category definitions ─────────────────────────
+
+    /// Replace this account's provider-known categories with `defs` (those created here and
+    /// not yet on the provider are kept).
+    pub fn replace_category_defs(&self, defs: &[crate::models::CategoryDef]) -> Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        let r = (|| -> Result<()> {
+            self.conn.execute("DELETE FROM category_defs WHERE account_id = ?1 AND pending = 0", params![self.account_id])?;
+            for d in defs {
+                self.conn.execute(
+                    "INSERT INTO category_defs (account_id, name, color, provider_color, pending) VALUES (?1, ?2, ?3, ?4, 0)
+                     ON CONFLICT(account_id, name) DO UPDATE SET color = ?3, provider_color = ?4, pending = 0",
+                    params![self.account_id, d.name, d.color, d.provider_color],
+                )?;
+            }
+            Ok(())
+        })();
+        match r {
+            Ok(()) => { self.conn.execute_batch("COMMIT")?; Ok(()) }
+            Err(e) => { let _ = self.conn.execute_batch("ROLLBACK"); Err(e) }
+        }
+    }
+
+    /// A category made in the UI: usable at once, created on the provider by the daemon.
+    pub fn add_pending_category(&self, name: &str, color_hex: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "INSERT OR IGNORE INTO category_defs (account_id, name, color, provider_color, pending) VALUES (?1, ?2, ?3, NULL, 1)",
+            params![self.account_id, name, color_hex],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn pending_categories(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT name, color FROM category_defs WHERE account_id = ?1 AND pending = 1")?;
+        let rows = stmt
+            .query_map(params![self.account_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn finish_pending_category(&self, name: &str, provider_color: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE category_defs SET pending = 0, provider_color = ?1 WHERE account_id = ?2 AND name = ?3",
+            params![provider_color, self.account_id, name],
+        )?;
+        Ok(())
+    }
+
+    /// The provider refused a category change for good: show what it has again.
+    pub fn revert_category_push(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE messages SET categories = categories_synced, cat_pending = 0 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Remember whether this account's category list could be read (Exchange needs the
+    /// MailboxSettings permission, which an account only has after signing in again).
+    pub fn set_master_list_available(&self, available: bool) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO category_state (account_id, master_list) VALUES (?1, ?2)
+             ON CONFLICT(account_id) DO UPDATE SET master_list = ?2",
+            params![self.account_id, available as i64],
+        )?;
+        Ok(())
+    }
+
     /// Make the cached read flags of one folder match the provider's list of unread ids.
     /// Rows with an unpushed local change are left alone. Returns rows changed.
     pub fn reconcile_read_state(&self, folder_id: &str, unread_ids: &[String]) -> Result<usize> {
@@ -1078,8 +1334,9 @@ impl Database {
         // debug!("Inserting email: {}", email.id);
 
         self.conn.execute(
-            "INSERT OR IGNORE INTO messages (id, subject, from_email, body, received_at, is_read, cached_at, folder_id, account_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR IGNORE INTO messages (id, subject, from_email, body, received_at, is_read, cached_at, folder_id, account_id,
+                    from_name, to_text, cc_text, bcc_text, categories, categories_synced, sent_at, importance, has_attachments, conversation_id, meta_ok)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 email.id,
                 email.subject,
@@ -1090,6 +1347,9 @@ impl Database {
                 now,
                 email.folder_id,
                 self.account_id,
+                email.from_name, email.to_text, email.cc_text, email.bcc_text,
+                categories_json(&email.categories),
+                email.sent_at, email.importance, email.has_attachments, email.conversation_id, email.meta,
             ],
         )?;
 
@@ -1115,13 +1375,16 @@ impl Database {
         self.conn.execute_batch("BEGIN")?;
         let result = (|| -> Result<usize> {
             let mut ins = self.conn.prepare_cached(
-                "INSERT OR IGNORE INTO messages (id, subject, from_email, body, received_at, is_read, cached_at, folder_id, account_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")?;
+                "INSERT OR IGNORE INTO messages (id, subject, from_email, body, received_at, is_read, cached_at, folder_id, account_id,
+                        from_name, to_text, cc_text, bcc_text, categories, categories_synced, sent_at, importance, has_attachments, conversation_id, meta_ok)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15, ?16, ?17, ?18, ?19)")?;
             let mut fix = self.conn.prepare_cached(
                 "UPDATE messages SET folder_id = ?1 WHERE id = ?2 AND folder_id IS NULL")?;
             let mut new = 0usize;
             for e in emails {
-                let n = ins.execute(params![e.id, e.subject, e.from, e.body, e.received, e.is_read, now, e.folder_id, self.account_id])?;
+                let n = ins.execute(params![e.id, e.subject, e.from, e.body, e.received, e.is_read, now, e.folder_id, self.account_id,
+                    e.from_name, e.to_text, e.cc_text, e.bcc_text, categories_json(&e.categories),
+                    e.sent_at, e.importance, e.has_attachments, e.conversation_id, e.meta])?;
                 if n > 0 {
                     new += 1;
                 } else if e.folder_id.is_some() {
@@ -1193,15 +1456,33 @@ impl Database {
             let mut changed = 0usize;
             {
                 let mut up = self.conn.prepare_cached(
-                    "INSERT INTO messages (id, subject, from_email, body, received_at, is_read, cached_at, folder_id, account_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                    "INSERT INTO messages (id, subject, from_email, body, received_at, is_read, cached_at, folder_id, account_id,
+                            from_name, to_text, cc_text, bcc_text, categories, categories_synced, sent_at, importance, has_attachments, conversation_id, meta_ok)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15, ?16, ?17, ?18, ?19)
                      ON CONFLICT(id) DO UPDATE SET
                         is_read   = CASE WHEN messages.read_pending = 1 THEN messages.is_read ELSE excluded.is_read END,
-                        folder_id = excluded.folder_id
+                        folder_id = excluded.folder_id,
+                        -- details: when the feed carries them (meta_ok), take them; a local category change
+                        -- that is not pushed yet keeps its own value
+                        from_name = CASE WHEN excluded.meta_ok = 1 THEN excluded.from_name ELSE messages.from_name END,
+                        to_text   = CASE WHEN excluded.meta_ok = 1 THEN excluded.to_text ELSE messages.to_text END,
+                        cc_text   = CASE WHEN excluded.meta_ok = 1 THEN excluded.cc_text ELSE messages.cc_text END,
+                        bcc_text  = CASE WHEN excluded.meta_ok = 1 THEN excluded.bcc_text ELSE messages.bcc_text END,
+                        sent_at   = CASE WHEN excluded.meta_ok = 1 THEN excluded.sent_at ELSE messages.sent_at END,
+                        importance = CASE WHEN excluded.meta_ok = 1 THEN excluded.importance ELSE messages.importance END,
+                        has_attachments = CASE WHEN excluded.meta_ok = 1 THEN excluded.has_attachments ELSE messages.has_attachments END,
+                        conversation_id = CASE WHEN excluded.meta_ok = 1 THEN excluded.conversation_id ELSE messages.conversation_id END,
+                        categories = CASE WHEN excluded.meta_ok = 1 AND messages.cat_pending = 0 THEN excluded.categories ELSE messages.categories END,
+                        categories_synced = CASE WHEN excluded.meta_ok = 1 THEN excluded.categories ELSE messages.categories_synced END,
+                        meta_ok   = CASE WHEN excluded.meta_ok = 1 THEN 1 ELSE messages.meta_ok END
                      WHERE (messages.read_pending = 0 AND messages.is_read != excluded.is_read)
-                        OR messages.folder_id IS NOT excluded.folder_id")?;
+                        OR messages.folder_id IS NOT excluded.folder_id
+                        OR (excluded.meta_ok = 1 AND messages.meta_ok = 0)
+                        OR (excluded.meta_ok = 1 AND messages.categories_synced IS NOT excluded.categories)")?;
                 for e in &page.upserts {
-                    changed += up.execute(params![e.id, e.subject, e.from, e.body, e.received, e.is_read, now, e.folder_id, self.account_id])?;
+                    changed += up.execute(params![e.id, e.subject, e.from, e.body, e.received, e.is_read, now, e.folder_id, self.account_id,
+                        e.from_name, e.to_text, e.cc_text, e.bcc_text, categories_json(&e.categories),
+                        e.sent_at, e.importance, e.has_attachments, e.conversation_id, e.meta])?;
                 }
             }
             let mut deleted = 0usize;
@@ -1775,7 +2056,7 @@ mod account_tests {
         let db = Database::open_for_account(":memory:", "a1").unwrap();
         let mk = |id: &str, read: bool| EmailMessage {
             id: id.into(), from: "x@y".into(), subject: "s".into(), received: "2026-10-01T00:00:00Z".into(),
-            body: "b".into(), folder_id: Some("f".into()), is_read: read,
+            body: "b".into(), folder_id: Some("f".into()), is_read: read, ..Default::default()
         };
         db.insert_email(&mk("m1", false)).unwrap();
         db.insert_email(&mk("m2", true)).unwrap();
@@ -1811,7 +2092,7 @@ mod account_tests {
         let db = Database::open_for_account(":memory:", "a1").unwrap();
         let mk = |id: &str, read: bool| EmailMessage {
             id: id.into(), from: "x@y.z".into(), subject: "s".into(), received: "2026-01-01T00:00:00Z".into(),
-            body: "b".into(), folder_id: Some("f".into()), is_read: read,
+            body: "b".into(), folder_id: Some("f".into()), is_read: read, ..Default::default()
         };
         db.insert_email(&mk("m1", false)).unwrap();
         db.insert_email(&mk("m2", true)).unwrap();
@@ -1843,6 +2124,77 @@ mod account_tests {
         db.finish_message_action("m1").unwrap();
         let left: i32 = db.conn.query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0)).unwrap();
         assert_eq!(left, 1);
+    }
+
+    #[test]
+    fn details_arrive_with_new_rows_and_a_delta_walk_fills_old_ones() {
+        let db = Database::open_for_account(":memory:", "a1").unwrap();
+        // an old row (no details), as stored before the fields existed
+        db.insert_email(&EmailMessage { id: "old".into(), from: "x@y.z".into(), subject: "s".into(), received: "2026-01-01T00:00:00Z".into(),
+            body: "b".into(), folder_id: Some("f".into()), is_read: true, ..Default::default() }).unwrap();
+        assert_eq!(db.meta_remaining().unwrap(), 1);
+        // a new row with details
+        db.insert_email(&EmailMessage { id: "new".into(), from: "a@b.c".into(), subject: "t".into(), received: "2026-02-01T00:00:00Z".into(),
+            body: "b".into(), folder_id: Some("f".into()), is_read: false, meta: true, from_name: Some("Ann".into()),
+            to_text: Some("Bob <bob@x.y>".into()), cc_text: Some("c@x.y".into()), categories: Some(vec!["Red".into()]),
+            importance: Some("high".into()), has_attachments: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(db.meta_remaining().unwrap(), 1, "new rows do not need the repopulate");
+        let get = |id: &str| -> (Option<String>, Option<String>, Option<String>, i64) {
+            db.conn.query_row("SELECT from_name, to_text, categories, meta_ok FROM messages WHERE id=?1", [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap()
+        };
+        assert_eq!(get("new"), (Some("Ann".into()), Some("Bob <bob@x.y>".into()), Some("[\"Red\"]".into()), 1));
+
+        // a delta walk carrying details fills the old row
+        let page = crate::models::DeltaPage {
+            upserts: vec![EmailMessage { id: "old".into(), from: "x@y.z".into(), subject: "s".into(), received: "2026-01-01T00:00:00Z".into(),
+                body: "b".into(), folder_id: Some("f".into()), is_read: true, meta: true, from_name: Some("Xavier".into()),
+                categories: Some(vec![]), ..Default::default() }],
+            removed: vec![], next_link: None,
+        };
+        let (changed, _) = db.apply_delta_page("f", &page, None).unwrap();
+        assert_eq!(changed, 1);
+        assert_eq!(get("old").0, Some("Xavier".into()));
+        assert_eq!(db.meta_remaining().unwrap(), 0);
+
+        // a category edited here and not yet pushed survives a feed page that says otherwise
+        assert_eq!(db.change_message_categories(&["old".into()], true, "Blue").unwrap(), 1);
+        assert_eq!(db.change_message_categories(&["old".into()], true, "blue").unwrap(), 0, "case-insensitive duplicate");
+        let page2 = crate::models::DeltaPage {
+            upserts: vec![EmailMessage { id: "old".into(), from: "x@y.z".into(), subject: "s".into(), received: "2026-01-01T00:00:00Z".into(),
+                body: "b".into(), folder_id: Some("f".into()), is_read: true, meta: true, categories: Some(vec!["Green".into()]), ..Default::default() }],
+            removed: vec![], next_link: None,
+        };
+        db.apply_delta_page("f", &page2, None).unwrap();
+        assert_eq!(get("old").2, Some("[\"Blue\"]".into()));
+        let pend = db.pending_category_pushes().unwrap();
+        assert_eq!(pend, vec![("old".to_string(), vec!["Blue".to_string()], vec!["Green".to_string()])]);
+        // pushing releases it; an edit made meanwhile keeps it pending
+        db.finish_category_push("old", &["Blue".to_string()]).unwrap();
+        assert!(db.pending_category_pushes().unwrap().is_empty());
+        db.change_message_categories(&["old".into()], false, "Blue").unwrap();
+        db.finish_category_push("old", &["Other".to_string()]).unwrap();
+        assert_eq!(db.pending_category_pushes().unwrap().len(), 1);
+        db.revert_category_push("old").unwrap();
+        assert_eq!(get("old").2, Some("[\"Other\"]".into()));
+    }
+
+    #[test]
+    fn category_defs_pending_and_replace() {
+        let db = Database::open_for_account(":memory:", "a1").unwrap();
+        assert!(db.add_pending_category("Work", "#0078d4").unwrap());
+        assert!(!db.add_pending_category("Work", "#e74856").unwrap(), "same name: no second row");
+        db.replace_category_defs(&[crate::models::CategoryDef { name: "Home".into(), color: "#10893e".into(), provider_color: Some("preset4".into()) }]).unwrap();
+        assert_eq!(db.pending_categories().unwrap(), vec![("Work".to_string(), "#0078d4".to_string())], "pending survives a refresh");
+        db.finish_pending_category("Work", Some("preset7")).unwrap();
+        assert!(db.pending_categories().unwrap().is_empty());
+        let n: i64 = db.conn.query_row("SELECT COUNT(*) FROM category_defs", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 2);
+        db.set_master_list_available(false).unwrap();
+        assert_eq!(db.conn.query_row("SELECT master_list FROM category_state", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert!(!db.flag_is_set("k").unwrap());
+        db.set_flag("k").unwrap();
+        assert!(db.flag_is_set("k").unwrap());
     }
 
     #[test]
@@ -1884,7 +2236,7 @@ mod account_tests {
         let db = Database::open_for_account(":memory:", "gmail-123abc").unwrap();
         db.insert_email(&EmailMessage {
             id: "m1".into(), from: "x@y".into(), subject: "s".into(), received: "2026-10-01T00:00:00Z".into(),
-            body: "b".into(), folder_id: Some("f".into()), is_read: false,
+            body: "b".into(), folder_id: Some("f".into()), is_read: false, ..Default::default()
         }).unwrap();
         db.upsert_event(&CalendarEvent {
             id: "e1".into(), subject: "s".into(), body: "".into(), start: "2026-10-01T09:00:00".into(),
@@ -2127,7 +2479,7 @@ mod multi_account_data_tests {
     #[test]
     fn known_message_ids_reports_only_stored_ones() {
         let (path, _ex, gm) = two_accounts("known");
-        let msg = |id: &str| EmailMessage { id: id.into(), from: "a@b.c".into(), subject: "s".into(), received: "2026-10-01T00:00:00Z".into(), body: "".into(), folder_id: None, is_read: true };
+        let msg = |id: &str| EmailMessage { id: id.into(), from: "a@b.c".into(), subject: "s".into(), received: "2026-10-01T00:00:00Z".into(), body: "".into(), folder_id: None, is_read: true, ..Default::default() };
         gm.insert_email(&msg("gmail-bbbbbb:1")).unwrap();
         gm.insert_email(&msg("gmail-bbbbbb:2")).unwrap();
         let ids: Vec<String> = ["gmail-bbbbbb:1", "gmail-bbbbbb:3", "gmail-bbbbbb:2"].iter().map(|s| s.to_string()).collect();
@@ -2146,7 +2498,7 @@ mod batch_insert_tests {
 
     fn msg(id: &str, folder: Option<&str>) -> EmailMessage {
         EmailMessage { id: id.into(), from: "a@b.c".into(), subject: format!("s {id}"), received: "2026-10-06T12:00:00Z".into(),
-                       body: "p".into(), folder_id: folder.map(String::from), is_read: false }
+                       body: "p".into(), folder_id: folder.map(String::from), is_read: false, ..Default::default() }
     }
 
     #[test]

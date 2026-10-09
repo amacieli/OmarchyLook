@@ -18,6 +18,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
+/// Marker that this account's change feeds were reset for the extended field list
+/// (bump the suffix when `providers::graph::MSG_SELECT` changes again).
+const FIELDS_FLAG: &str = "fields_v1";
+
 /// Configuration for the email daemon
 pub struct DaemonConfig {
     /// Fallback poll interval; when `settings_path` is set the value in that file wins and is
@@ -124,6 +128,7 @@ impl EmailDaemon {
                         match self.sync_folders().await {
                             Ok(count) => {
                                 info!("Synced {} folders", count);
+                                self.sync_categories().await;
                                 last_folder_sync = Some(Instant::now());
                                 sync_state::bump_mail("folder counts updated");
                             }
@@ -155,6 +160,13 @@ impl EmailDaemon {
                         }
                     }
 
+                    // Message details for providers without a change feed, a slice per cycle.
+                    self.backfill_meta_per_message(Duration::from_secs(60)).await;
+                    if self.provider.supports_delta() {
+                        let still = self.db.delta_walk_incomplete().unwrap_or(0) > 0;
+                        sync_state::set_meta_active(&acct, still && self.db.meta_remaining().unwrap_or(0) > 0);
+                    }
+
                     // Safety net: whatever happened above, never hold calendar/contacts back.
                     sync_state::open_gate(&acct);
 
@@ -171,6 +183,7 @@ impl EmailDaemon {
                             seen_push = now_push;
                             self.push_pending_reads().await;
                             self.push_due_actions().await;
+                            self.push_pending_categories().await;
                         }
                         tokio::select! {
                             _ = tokio::time::sleep_until(deadline) => break,
@@ -212,6 +225,8 @@ impl EmailDaemon {
         // Local read/unread changes go out first, so the reconcile below cannot undo them.
         self.push_pending_reads().await;
         self.push_due_actions().await;
+        self.push_pending_categories().await;
+        self.prepare_meta_backfill().await;
 
         // Providers with a change feed (Graph delta) sync by changes: one cheap call per folder
         // instead of reading flags and re-crawling every folder.
@@ -383,6 +398,122 @@ impl EmailDaemon {
         }
     }
 
+    /// One-time repopulate of the message details (sender name, To/Cc/Bcc, categories, …) for
+    /// rows stored before those fields existed.
+    ///  * Providers with a change feed: the stored feed links carry the old field list, so the
+    ///    feeds are reset once and the next walk of each folder brings everything.
+    ///  * Others: details are fetched message by message in the background, throttled.
+    async fn prepare_meta_backfill(&self) {
+        let acct = self.db.account_id().to_string();
+        let remaining = self.db.meta_remaining().unwrap_or(0);
+        if remaining == 0 {
+            sync_state::set_meta_active(&acct, false);
+            return;
+        }
+        if self.provider.supports_delta() {
+            if !self.db.flag_is_set(FIELDS_FLAG).unwrap_or(true) {
+                match self.db.reset_all_delta_states() {
+                    Ok(n) => {
+                        info!("Message fields: {} messages need details; walking {} folder feeds again", remaining, n);
+                        let _ = self.db.set_flag(FIELDS_FLAG);
+                    }
+                    Err(e) => warn!("Could not reset the change feeds for the new fields: {}", e),
+                }
+            }
+            sync_state::set_meta_active(&acct, self.db.delta_walk_incomplete().unwrap_or(0) > 0 || !self.db.flag_is_set(FIELDS_FLAG).unwrap_or(true));
+        } else {
+            sync_state::set_meta_active(&acct, true);
+        }
+    }
+
+    /// Per-message repopulate for providers without a change feed. Works for at most
+    /// `budget`, then yields so mail sync and pushes keep their rhythm; the next cycle carries on.
+    async fn backfill_meta_per_message(&self, budget: Duration) {
+        if !self.provider.repopulates_meta_per_message() { return; }
+        let acct = self.db.account_id().to_string();
+        let started = Instant::now();
+        let mut skip: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut filled = 0usize;
+        while started.elapsed() < budget {
+            let rows = match self.db.messages_needing_meta(200) {
+                Ok(r) => r,
+                Err(e) => { warn!("Could not list messages needing details: {}", e); break; }
+            };
+            let ids: Vec<String> = rows.into_iter().map(|(id, _)| id).filter(|id| !skip.contains(id)).take(40).collect();
+            if ids.is_empty() { break; }
+            let metas = self.provider.fetch_message_meta(&ids).await;
+            for m in &metas {
+                if let Err(e) = self.db.update_message_meta(m) { warn!("Could not store details of {}: {}", m.id, e); }
+            }
+            filled += metas.len();
+            let got: std::collections::HashSet<&str> = metas.iter().map(|m| m.id.as_str()).collect();
+            for id in &ids { if !got.contains(id.as_str()) { skip.insert(id.clone()); } }
+            sleep(Duration::from_millis(400)).await;
+        }
+        if filled > 0 {
+            debug!("mail[{}] message details: filled {} ({} skipped this round)", acct, filled, skip.len());
+            sync_state::bump_mail("message details filled in");
+        }
+        if self.db.meta_remaining().unwrap_or(0) == 0 || skip.len() >= self.db.meta_remaining().unwrap_or(0) as usize {
+            sync_state::set_meta_active(&acct, false);
+        }
+    }
+
+    /// Read the account's categories / labels with their colours.
+    async fn sync_categories(&self) {
+        match self.provider.fetch_categories().await {
+            Ok(defs) => {
+                if let Err(e) = self.db.replace_category_defs(&defs) { warn!("Could not store categories: {}", e); }
+                let _ = self.db.set_master_list_available(true);
+            }
+            Err(e) => {
+                let m = e.to_string();
+                // Exchange refuses the list until the account has signed in again with the
+                // MailboxSettings permission; categories still work by name, just uncoloured here.
+                if m.contains("403") || m.contains("401") || m.to_lowercase().contains("access") || m.contains("not supported") {
+                    debug!("Category list not available for this account: {}", m);
+                    let _ = self.db.set_master_list_available(false);
+                } else {
+                    warn!("Could not read categories: {}", m);
+                }
+            }
+        }
+    }
+
+    /// Create categories made in the UI, then push category changes on messages.
+    async fn push_pending_categories(&self) {
+        if let Ok(pending) = self.db.pending_categories() {
+            for (name, hex) in pending {
+                let color = crate::models::CATEGORY_PALETTE.iter().find(|c| c.hex == hex || c.gmail_bg == hex)
+                    .unwrap_or(&crate::models::CATEGORY_PALETTE[6]);
+                match self.provider.create_category(&name, color).await {
+                    Ok(def) => { let _ = self.db.finish_pending_category(&name, def.provider_color.as_deref()); }
+                    Err(e) if crate::compose::is_transient(&e) => warn!("Category '{}' will be created later: {}", name, e),
+                    Err(e) => {
+                        // Exchange without the MailboxSettings permission: the name still works on messages.
+                        warn!("Could not create category '{}' on the provider: {}", name, e);
+                        let _ = self.db.finish_pending_category(&name, None);
+                    }
+                }
+            }
+        }
+        let pushes = match self.db.pending_category_pushes() {
+            Ok(p) => p,
+            Err(e) => { error!("Could not list pending category changes: {}", e); return; }
+        };
+        for (id, wanted, had) in pushes {
+            match self.provider.set_message_categories(&id, &wanted, &had).await {
+                Ok(()) => { let _ = self.db.finish_category_push(&id, &wanted); }
+                Err(e) if crate::compose::is_transient(&e) => warn!("Categories of {} will be pushed later: {}", id, e),
+                Err(e) => {
+                    warn!("Provider refused the category change for {}: {}", id, e);
+                    let _ = self.db.revert_category_push(&id);
+                    sync_state::bump_mail("category change refused");
+                }
+            }
+        }
+    }
+
     /// Push archive / delete / move actions whose undo window is over. A transient failure
     /// leaves the action queued for the next cycle; a refusal puts the message back in its list.
     async fn push_due_actions(&self) {
@@ -549,7 +680,7 @@ mod delta_tests {
 
     fn msg(id: &str, read: bool) -> EmailMessage {
         EmailMessage { id: id.into(), from: "a@b.c".into(), subject: format!("s{id}"), received: "2026-10-06T12:00:00Z".into(),
-                       body: "p".into(), folder_id: Some("F".into()), is_read: read }
+                       body: "p".into(), folder_id: Some("F".into()), is_read: read, ..Default::default() }
     }
     fn page(up: Vec<EmailMessage>, removed: Vec<&str>, next: Option<&str>) -> DeltaPage {
         DeltaPage { upserts: up, removed: removed.into_iter().map(String::from).collect(), next_link: next.map(String::from) }

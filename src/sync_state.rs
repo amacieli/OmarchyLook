@@ -20,6 +20,7 @@ static READ_PUSH: tokio::sync::Notify = tokio::sync::Notify::const_new();
 static OUTBOX_SERIAL: AtomicU64 = AtomicU64::new(0);
 static OUTBOX: tokio::sync::Notify = tokio::sync::Notify::const_new();
 static GATE: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+static META_ACTIVE: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 pub fn mail_serial() -> u64 {
     MAIL_SERIAL.load(Ordering::SeqCst)
@@ -29,6 +30,18 @@ pub fn mail_serial() -> u64 {
 pub fn bump_mail(reason: &str) {
     let n = MAIL_SERIAL.fetch_add(1, Ordering::SeqCst) + 1;
     perf::mark(&format!("sync serial -> {} ({})", n, reason));
+}
+
+/// The one-time repopulate of message details is running (or not) for `account`.
+pub fn set_meta_active(account: &str, active: bool) {
+    let mut g = META_ACTIVE.lock().unwrap_or_else(|p| p.into_inner());
+    let set = g.get_or_insert_with(HashSet::new);
+    if active { set.insert(account.to_string()); } else { set.remove(account); }
+}
+
+/// True while any account is repopulating message details (drives the status-bar progress).
+pub fn meta_active() -> bool {
+    META_ACTIVE.lock().unwrap_or_else(|p| p.into_inner()).as_ref().map(|s| !s.is_empty()).unwrap_or(false)
 }
 
 /// Mail's priority work for this account is done; calendar/contacts may start.

@@ -7,6 +7,12 @@ use async_trait::async_trait;
 use log::{debug, error, warn};
 use tokio::sync::Mutex;
 
+/// Message fields the list, reading pane and categories need. They are part of the change-feed
+/// link, so changing this list requires a fresh walk of every folder
+/// (see `email_daemon::FIELDS_VERSION`).
+pub(crate) const MSG_SELECT: &str = "id,subject,from,receivedDateTime,bodyPreview,isRead,parentFolderId,\
+toRecipients,ccRecipients,bccRecipients,categories,sentDateTime,importance,hasAttachments,conversationId";
+
 pub struct GraphEmailProvider {
     auth: Mutex<AuthManager>,
 }
@@ -71,8 +77,21 @@ impl GraphEmailProvider {
         Ok((content_type.to_string(), json["body"]["content"].as_str().unwrap_or("").to_string()))
     }
 
+    /// `Name <addr>, addr2` from a Graph recipient list; None when there are none.
+    pub(crate) fn recipients_text(list: &serde_json::Value) -> Option<String> {
+        let parts: Vec<String> = list.as_array()?.iter().filter_map(|r| {
+            let addr = r["emailAddress"]["address"].as_str().unwrap_or("").trim();
+            let name = r["emailAddress"]["name"].as_str().unwrap_or("").trim();
+            if addr.is_empty() {
+                return if name.is_empty() { None } else { Some(name.to_string()) };
+            }
+            if name.is_empty() || name.eq_ignore_ascii_case(addr) { Some(addr.to_string()) } else { Some(format!("{} <{}>", name, addr)) }
+        }).collect();
+        if parts.is_empty() { None } else { Some(parts.join(", ")) }
+    }
+
     /// Parse a Graph API message JSON value into an EmailMessage
-    fn parse_message(msg: &serde_json::Value) -> EmailMessage {
+    pub(crate) fn parse_message(msg: &serde_json::Value) -> EmailMessage {
         let id = msg["id"].as_str().unwrap_or("").to_string();
         let subject = msg["subject"].as_str().unwrap_or("(no subject)").to_string();
         let received = msg["receivedDateTime"]
@@ -88,7 +107,20 @@ impl GraphEmailProvider {
 
         let is_read = msg["isRead"].as_bool().unwrap_or(false);
 
-        EmailMessage { id, from, subject, received, body: preview, folder_id: parent_folder_id, is_read }
+        let non_empty = |v: &serde_json::Value| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+        EmailMessage {
+            id, from, subject, received, body: preview, folder_id: parent_folder_id, is_read,
+            meta: true,
+            from_name: non_empty(&msg["from"]["emailAddress"]["name"]),
+            to_text: Self::recipients_text(&msg["toRecipients"]),
+            cc_text: Self::recipients_text(&msg["ccRecipients"]),
+            bcc_text: Self::recipients_text(&msg["bccRecipients"]),
+            categories: Some(msg["categories"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect()).unwrap_or_default()),
+            sent_at: non_empty(&msg["sentDateTime"]),
+            importance: non_empty(&msg["importance"]).map(|s| s.to_lowercase()),
+            has_attachments: msg["hasAttachments"].as_bool(),
+            conversation_id: non_empty(&msg["conversationId"]),
+        }
     }
 }
 
@@ -107,9 +139,9 @@ impl super::EmailProvider for GraphEmailProvider {
         // Use well-known names directly OR folder IDs
         let url = format!(
             "https://graph.microsoft.com/v1.0/me/mailFolders/{}/messages?\
-             $top={}&$select=id,subject,from,receivedDateTime,bodyPreview,isRead,parentFolderId\
+             $top={}&$select={sel}\
              &$orderby=receivedDateTime desc",
-            folder_id, limit
+            folder_id, limit, sel = MSG_SELECT
         );
 
         let response = client
@@ -147,9 +179,9 @@ impl super::EmailProvider for GraphEmailProvider {
 
         let mut next_url = Some(format!(
             "https://graph.microsoft.com/v1.0/me/mailFolders/{}/messages?\
-             $top=50&$select=id,subject,from,receivedDateTime,bodyPreview,isRead,parentFolderId\
+             $top=50&$select={sel}\
              &$orderby=receivedDateTime desc",
-            folder_id
+            folder_id, sel = MSG_SELECT
         ));
 
         let mut total = 0usize;
@@ -212,8 +244,8 @@ impl super::EmailProvider for GraphEmailProvider {
         let mut url = link.clone().unwrap_or_else(|| {
             format!(
                 "https://graph.microsoft.com/v1.0/me/mailFolders/{}/messages/delta?\
-                 $select=id,subject,from,receivedDateTime,bodyPreview,isRead,parentFolderId",
-                folder_id
+                 $select={sel}",
+                folder_id, sel = MSG_SELECT
             )
         });
         loop {
@@ -328,6 +360,56 @@ impl super::EmailProvider for GraphEmailProvider {
             .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/json")
             .body(format!("{{\"isRead\": {}}}", is_read))
+            .send()
+            .await
+            .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+        Self::check_response(response).await.map(|_| ())
+    }
+
+    async fn fetch_categories(&self) -> Result<Vec<crate::models::CategoryDef>> {
+        let token = self.get_token().await?;
+        let client = reqwest::Client::new();
+        let response = client
+            .get("https://graph.microsoft.com/v1.0/me/outlook/masterCategories")
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+        let body = Self::check_response(response).await?;
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+        Ok(json["value"].as_array().into_iter().flatten().filter_map(|c| {
+            let name = c["displayName"].as_str()?.to_string();
+            let preset = c["color"].as_str().unwrap_or("none").to_string();
+            Some(crate::models::CategoryDef {
+                color: crate::models::graph_preset_hex(&preset).to_string(),
+                name,
+                provider_color: Some(preset),
+            })
+        }).collect())
+    }
+
+    async fn create_category(&self, name: &str, color: &crate::models::PaletteColor) -> Result<crate::models::CategoryDef> {
+        let token = self.get_token().await?;
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://graph.microsoft.com/v1.0/me/outlook/masterCategories")
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&serde_json::json!({ "displayName": name, "color": color.graph_preset }))
+            .send()
+            .await
+            .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
+        Self::check_response(response).await?;
+        Ok(crate::models::CategoryDef { name: name.to_string(), color: color.hex.to_string(), provider_color: Some(color.graph_preset.to_string()) })
+    }
+
+    async fn set_message_categories(&self, id: &str, wanted: &[String], _had: &[String]) -> Result<()> {
+        let token = self.get_token().await?;
+        let client = reqwest::Client::new();
+        let response = client
+            .patch(format!("https://graph.microsoft.com/v1.0/me/messages/{}", id))
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&serde_json::json!({ "categories": wanted }))
             .send()
             .await
             .map_err(|e| crate::errors::OmarchyError::HttpError(e.to_string()))?;
@@ -497,5 +579,40 @@ fn infer_well_known_name(display_name: &str) -> Option<String> {
         "conversation history"  => Some("conversationhistory".to_string()),
         "clutter"               => Some("clutter".to_string()),
         _                       => None,
+    }
+}
+
+#[cfg(test)]
+mod detail_parse_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn graph_message_details_are_parsed() {
+        let m = json!({
+            "id": "AAMk1", "subject": "Lunch?", "receivedDateTime": "2026-10-09T12:00:00Z", "bodyPreview": "hi",
+            "isRead": false, "parentFolderId": "F1", "importance": "High", "hasAttachments": true,
+            "sentDateTime": "2026-10-09T11:59:58Z", "conversationId": "conv1", "categories": ["Red category", "Work"],
+            "from": {"emailAddress": {"name": "Ada Lovelace", "address": "ada@x.org"}},
+            "toRecipients": [{"emailAddress": {"name": "Bob", "address": "bob@x.org"}}, {"emailAddress": {"name": "", "address": "cy@x.org"}}],
+            "ccRecipients": [{"emailAddress": {"name": "dee@x.org", "address": "dee@x.org"}}],
+            "bccRecipients": []
+        });
+        let e = GraphEmailProvider::parse_message(&m);
+        assert!(e.meta);
+        assert_eq!(e.from, "ada@x.org");
+        assert_eq!(e.from_name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(e.to_text.as_deref(), Some("Bob <bob@x.org>, cy@x.org"));
+        assert_eq!(e.cc_text.as_deref(), Some("dee@x.org"));
+        assert_eq!(e.bcc_text, None);
+        assert_eq!(e.categories, Some(vec!["Red category".to_string(), "Work".to_string()]));
+        assert_eq!(e.importance.as_deref(), Some("high"));
+        assert_eq!(e.has_attachments, Some(true));
+        assert_eq!(e.conversation_id.as_deref(), Some("conv1"));
+        assert_eq!(e.sent_at.as_deref(), Some("2026-10-09T11:59:58Z"));
+        // a bare message still parses, with empty (not missing) categories
+        let bare = GraphEmailProvider::parse_message(&json!({"id": "x"}));
+        assert_eq!(bare.categories, Some(vec![]));
+        assert!(MSG_SELECT.contains("categories") && MSG_SELECT.contains("bccRecipients"));
     }
 }

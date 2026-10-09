@@ -54,6 +54,35 @@ pub trait EmailProvider: Send + Sync {
         Err(crate::errors::OmarchyError::HttpError("message actions not supported".into()))
     }
 
+    /// Categories (Exchange) / user labels (Gmail) of the account with their colours.
+    /// Err when the account may not read them (Exchange before it re-signs-in with the
+    /// MailboxSettings permission).
+    async fn fetch_categories(&self) -> Result<Vec<crate::models::CategoryDef>> {
+        Err(crate::errors::OmarchyError::HttpError("fetch_categories not supported".into()))
+    }
+
+    /// Create a category / label with a palette colour on the provider.
+    async fn create_category(&self, _name: &str, _color: &crate::models::PaletteColor) -> Result<crate::models::CategoryDef> {
+        Err(crate::errors::OmarchyError::HttpError("create_category not supported".into()))
+    }
+
+    /// Make a message's categories `wanted` (`had` is what the provider last reported; Gmail
+    /// adds and removes the difference, Exchange just sets the list).
+    async fn set_message_categories(&self, _id: &str, _wanted: &[String], _had: &[String]) -> Result<()> {
+        Err(crate::errors::OmarchyError::HttpError("set_message_categories not supported".into()))
+    }
+
+    /// True when the provider has no change feed to repopulate message details with, so the
+    /// daemon fetches them message by message (`fetch_message_meta`).
+    fn repopulates_meta_per_message(&self) -> bool {
+        false
+    }
+
+    /// Details of these (scoped) message ids; ones that fail are left out and retried later.
+    async fn fetch_message_meta(&self, _ids: &[String]) -> Vec<EmailMessage> {
+        Vec::new()
+    }
+
     /// Send a composed message. `from` is the account's own address (providers that sign the
     /// From line themselves may ignore it). Err(transient) failures are retried by the outbox
     /// (see `compose::is_transient`); everything else is reported to the user.

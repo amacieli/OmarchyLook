@@ -21,6 +21,15 @@ const GRAPH_SCOPE: &str = "https://graph.microsoft.com/Mail.ReadWrite https://gr
 // login being thrown away. Mail.ReadWrite already covers Mail.Read; Mail.Send is unchanged.
 const GRAPH_SCOPE_BASE: &str = "https://graph.microsoft.com/Mail.ReadWrite https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Calendars.Read https://graph.microsoft.com/Contacts.Read https://graph.microsoft.com/User.Read offline_access";
 const DEVICE_AUTH_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode";
+// Top tier: the full set plus the mailbox-settings permission, which is what reading and writing
+// the category list (names + colours) needs. Accounts that have not consented to it (or an app
+// registration that does not list it) fall back to the full / base tiers without losing anything.
+const MAILBOX_SCOPE: &str = "https://graph.microsoft.com/MailboxSettings.ReadWrite";
+
+fn plus_scope() -> String {
+    format!("{} {}", GRAPH_SCOPE, MAILBOX_SCOPE)
+}
+
 const TOKEN_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
 
 /// Refreshes Microsoft tokens; classifies failures so the broker only wipes
@@ -34,6 +43,9 @@ struct MsRefresher {
     /// `<config dir>/token_scope_<account id>`; exists only while the base tier applies.
     /// Holds no secret. Removed by a fresh sign-in (`reset`), the only way to gain scopes.
     marker: std::path::PathBuf,
+    /// Same idea one tier up: set once the account turned out not to cover `plus_scope()`.
+    plus_unavailable: std::sync::atomic::AtomicBool,
+    plus_marker: std::path::PathBuf,
 }
 
 impl MsRefresher {
@@ -43,7 +55,15 @@ impl MsRefresher {
 
     fn with_marker(marker: std::path::PathBuf) -> Self {
         let base_tier = marker.exists();
-        Self { full_scope_unavailable: std::sync::atomic::AtomicBool::new(base_tier), marker }
+        let mut plus_name = marker.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        plus_name.push("_plus");
+        let plus_marker = marker.with_file_name(plus_name);
+        Self {
+            full_scope_unavailable: std::sync::atomic::AtomicBool::new(base_tier),
+            plus_unavailable: std::sync::atomic::AtomicBool::new(plus_marker.exists()),
+            marker,
+            plus_marker,
+        }
     }
 
     /// One refresh attempt for `scope`. The bool is true when the failure only means a
@@ -72,6 +92,8 @@ fn classify_refresh_error(code: u16, body: &str) -> (RefreshOutcome, bool) {
     let err = json.as_ref().and_then(|v| v["error"].as_str()).unwrap_or("");
     let desc = json.as_ref().and_then(|v| v["error_description"].as_str()).unwrap_or("").to_lowercase();
     match err {
+        // The app registration does not list a requested scope: same effect as missing consent.
+        "invalid_scope" => (RefreshOutcome::InvalidGrant(format!("{}: {}", code, err)), true),
         "invalid_grant" | "interaction_required" | "consent_required" => {
             // AADSTS65001: the user has not consented to (one of) the requested scopes.
             let consent_missing = err == "consent_required" || desc.contains("aadsts65001") || desc.contains("consent");
@@ -84,6 +106,17 @@ fn classify_refresh_error(code: u16, body: &str) -> (RefreshOutcome, bool) {
 impl Refresher for MsRefresher {
     fn refresh(&self, refresh_token: &str) -> RefreshOutcome {
         use std::sync::atomic::Ordering;
+        if !self.plus_unavailable.load(Ordering::Relaxed) {
+            let (outcome, consent_missing) = Self::attempt(refresh_token, &plus_scope());
+            if !consent_missing {
+                return outcome;
+            }
+            debug!("Account has not consented to the mailbox-settings scope; category colours need a fresh sign-in");
+            self.plus_unavailable.store(true, Ordering::Relaxed);
+            if let Err(e) = std::fs::write(&self.plus_marker, b"plus") {
+                warn!("Could not record the scope tier ({}): {}", self.plus_marker.display(), e);
+            }
+        }
         if !self.full_scope_unavailable.load(Ordering::Relaxed) {
             let (outcome, consent_missing) = Self::attempt(refresh_token, GRAPH_SCOPE);
             if !consent_missing {
@@ -102,6 +135,8 @@ impl Refresher for MsRefresher {
     fn reset(&self) {
         self.full_scope_unavailable.store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = std::fs::remove_file(&self.marker);
+        self.plus_unavailable.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _ = std::fs::remove_file(&self.plus_marker);
     }
 }
 
@@ -232,14 +267,33 @@ impl AuthManager {
     fn acquire_device_code(&self) -> Result<DeviceFlowResponse> {
         debug!("Requesting device code from {}", DEVICE_AUTH_URL);
         
+        // Ask for the top tier first; an app registration that does not list the mailbox
+        // permission rejects it, and signing in with the full set must still work then.
+        let plus = plus_scope();
+        let mut scope = plus.as_str();
         let params = [
             ("client_id", PUBLIC_CLIENT_ID),
-            ("scope", GRAPH_SCOPE),
+            ("scope", scope),
         ];
+        let first = ureq::post(DEVICE_AUTH_URL).send_form(&params);
+        let first = match first {
+            Err(ureq::Error::Status(code, r)) => {
+                let body = r.into_string().unwrap_or_default();
+                if body.contains("invalid_scope") || body.contains("AADSTS70011") || body.contains("AADSTS650053") {
+                    warn!("Device code with the mailbox-settings scope refused ({}); using the standard scopes", code);
+                    scope = GRAPH_SCOPE;
+                    let retry = [("client_id", PUBLIC_CLIENT_ID), ("scope", scope)];
+                    ureq::post(DEVICE_AUTH_URL).send_form(&retry)
+                } else {
+                    Err(ureq::Error::Status(code, ureq::Response::new(code, "error", &body).unwrap_or_else(|_| ureq::Response::new(500, "error", "").unwrap())))
+                }
+            }
+            other => other,
+        };
         
         // ureq 2.x returns Err(ureq::Error::Status(code, response)) for non-2xx —
         // we must handle that arm to read the error body, not just convert to string.
-        let resp = match ureq::post(DEVICE_AUTH_URL).send_form(&params) {
+        let resp = match first {
             Ok(r) => r,
             Err(ureq::Error::Status(code, r)) => {
                 let body = r.into_string().unwrap_or_default();
@@ -619,5 +673,37 @@ mod scope_marker_tests {
         r.reset();
         assert!(!r.full_scope_unavailable.load(Ordering::Relaxed));
         assert!(!path.exists(), "re-login must retry the full scope set");
+    }
+}
+
+#[cfg(test)]
+mod scope_plus_tests {
+    use super::*;
+    use crate::token_store::Refresher;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn plus_tier_is_the_full_set_plus_mailbox_settings_and_has_its_own_marker() {
+        assert!(plus_scope().starts_with(GRAPH_SCOPE));
+        assert!(plus_scope().ends_with("MailboxSettings.ReadWrite"));
+        assert!(!GRAPH_SCOPE.contains("MailboxSettings"), "the lower tiers must not ask for it");
+        let path = std::env::temp_dir().join(format!("omarchylook-plus-{}", std::process::id()));
+        let plus = path.with_file_name(format!("{}_plus", path.file_name().unwrap().to_string_lossy()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&plus);
+        assert!(!MsRefresher::with_marker(path.clone()).plus_unavailable.load(Ordering::Relaxed));
+        std::fs::write(&plus, b"plus").unwrap();
+        let r = MsRefresher::with_marker(path.clone());
+        assert!(r.plus_unavailable.load(Ordering::Relaxed), "next launch skips the doomed top-tier call");
+        assert!(!r.full_scope_unavailable.load(Ordering::Relaxed), "and still tries the full tier");
+        r.reset();
+        assert!(!r.plus_unavailable.load(Ordering::Relaxed) && !plus.exists());
+    }
+
+    #[test]
+    fn an_unlisted_scope_counts_as_missing_consent() {
+        let body = r#"{"error":"invalid_scope","error_description":"AADSTS70011: The provided request must include a 'scope' input parameter"}"#;
+        let (_, missing) = classify_refresh_error(400, body);
+        assert!(missing);
     }
 }

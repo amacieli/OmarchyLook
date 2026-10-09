@@ -648,6 +648,114 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     continue;
                 }
 
+                // ── GET /categories?account=ID — the account's categories (Exchange) / user labels
+                // (Gmail) with colours, whether the Exchange category list is readable at all, and
+                // the colour palette for new ones. ──
+                if first_line.contains("GET /categories") {
+                    let db_path = config_dir.join("messages.db");
+                    let account = query_param(first_line, "account").unwrap_or_default();
+                    let body = match rusqlite::Connection::open(&db_path) {
+                        Ok(conn) => {
+                            let cats: Vec<serde_json::Value> = conn
+                                .prepare("SELECT name, color, pending FROM category_defs WHERE account_id = ?1 ORDER BY lower(name)")
+                                .and_then(|mut st| {
+                                    st.query_map(rusqlite::params![account], |r| Ok(serde_json::json!({
+                                        "name": r.get::<_, String>(0)?, "color": r.get::<_, String>(1)?, "pending": r.get::<_, i64>(2)? != 0,
+                                    }))).map(|it| it.flatten().collect())
+                                })
+                                .unwrap_or_default();
+                            let master: bool = conn
+                                .query_row("SELECT master_list FROM category_state WHERE account_id = ?1", rusqlite::params![account], |r| r.get::<_, i64>(0))
+                                .map(|v| v != 0)
+                                .unwrap_or(true);
+                            let palette: Vec<serde_json::Value> = omarchylook::models::CATEGORY_PALETTE.iter()
+                                .map(|c| serde_json::json!({ "key": c.key, "label": c.label, "hex": c.hex }))
+                                .collect();
+                            serde_json::json!({ "categories": cats, "master_list": master, "palette": palette }).to_string()
+                        }
+                        Err(_) => serde_json::json!({ "categories": [], "master_list": true, "palette": [] }).to_string(),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── POST /categories/create?account=ID&name=X&color=KEY — a new category / label.
+                // Usable at once; the daemon creates it on the provider. ──
+                if first_line.contains("POST /categories/create") {
+                    let account = query_param(first_line, "account").unwrap_or_default();
+                    let name = query_param(first_line, "name").unwrap_or_default().trim().to_string();
+                    let color = query_param(first_line, "color").and_then(|k| omarchylook::models::palette_color(&k));
+                    let body = match color {
+                        Some(c) if !account.is_empty() && !name.is_empty() && name.chars().count() <= 64 && !name.chars().any(|ch| ch.is_control() || ch == ';' || ch == ',') => {
+                            match Database::open_for_account(config_dir.join("messages.db").to_str().unwrap_or("messages.db"), &account)
+                                .and_then(|db| db.add_pending_category(&name, c.hex))
+                            {
+                                Ok(created) => {
+                                    omarchylook::sync_state::request_read_push();
+                                    serde_json::json!({ "created": created }).to_string()
+                                }
+                                Err(e) => serde_json::json!({ "error": format!("database: {}", e) }).to_string(),
+                            }
+                        }
+                        _ => serde_json::json!({ "error": "need account, a name (max 64 chars, no ; or ,) and a palette colour" }).to_string(),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── POST /messages/category?ids=a,b&op=add|remove&name=X — set / clear a category on
+                // messages. Stored at once; the daemon pushes it to the provider. ──
+                if first_line.contains("POST /messages/category") {
+                    let ids: Vec<String> = query_param(first_line, "ids")
+                        .map(|v| v.split(',').filter(|s| !s.is_empty()).map(String::from).collect())
+                        .unwrap_or_default();
+                    let name = query_param(first_line, "name").unwrap_or_default();
+                    let add = match query_param(first_line, "op").as_deref() { Some("add") => Some(true), Some("remove") => Some(false), _ => None };
+                    let body = match add {
+                        Some(add) if !ids.is_empty() && !name.is_empty() => {
+                            match Database::open(config_dir.join("messages.db").to_str().unwrap_or("messages.db"))
+                                .and_then(|db| db.change_message_categories(&ids, add, &name))
+                            {
+                                Ok(changed) => {
+                                    if changed > 0 { omarchylook::sync_state::request_read_push(); }
+                                    serde_json::json!({ "changed": changed }).to_string()
+                                }
+                                Err(e) => serde_json::json!({ "error": format!("database: {}", e) }).to_string(),
+                            }
+                        }
+                        _ => serde_json::json!({ "error": "need ids, name and op=add|remove" }).to_string(),
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
+                // ── GET /messages/meta_progress — {"active":bool,"remaining":N}: the one-time
+                // repopulate of message details (sender name, To/Cc/Bcc, categories…). ──
+                if first_line.contains("GET /messages/meta_progress") {
+                    let remaining: i64 = rusqlite::Connection::open(config_dir.join("messages.db"))
+                        .and_then(|c| c.query_row("SELECT COUNT(*) FROM messages WHERE meta_ok = 0", [], |r| r.get(0)))
+                        .unwrap_or(0);
+                    let body = serde_json::json!({ "active": omarchylook::sync_state::meta_active(), "remaining": remaining }).to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
                 // ── POST /messages/action?ids=a,b&op=archive|trash|delete|move[&dest=FOLDER] —
                 // archive / trash / delete / move messages. The rows are hidden at once; the daemon
                 // tells the provider when the undo window (the mail "send delay") is over.
@@ -882,26 +990,43 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     let db_path = config_dir.join("messages.db");
                     let body = match rusqlite::Connection::open(&db_path) {
                         Ok(conn) => {
+                            // Category colours per (account, lower-cased name), so each row can say
+                            // which categories it carries and how to draw them.
+                            let mut cat_colors: std::collections::HashMap<(String, String), String> = std::collections::HashMap::new();
+                            if let Ok(mut st) = conn.prepare("SELECT account_id, name, color FROM category_defs") {
+                                if let Ok(rows) = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))) {
+                                    for (a, n, c) in rows.flatten() { cat_colors.insert((a, n.to_lowercase()), c); }
+                                }
+                            }
                             let map_row = |row: &rusqlite::Row| {
-                                let id: String = row.get(0)?;
-                                let subject: String = row.get(1)?;
-                                let from_email: String = row.get(2)?;
-                                let from_name: String = row.get::<_, Option<String>>(3)?.unwrap_or_default();
-                                let received_at: String = row.get(4)?;
-                                let is_read: bool = row.get(5)?;
                                 let account_id: String = row.get(6)?;
-                                let account_email: String = row.get(7)?;
-                                Ok(format!(
-                                    "{{\"id\":{},\"subject\":{},\"from_email\":{},\"from_name\":{},\"received_at\":{},\"is_read\":{},\"account_id\":{},\"account_email\":{}}}",
-                                    serde_json::to_string(&id).unwrap(),
-                                    serde_json::to_string(&subject).unwrap(),
-                                    serde_json::to_string(&from_email).unwrap(),
-                                    serde_json::to_string(&from_name).unwrap(),
-                                    serde_json::to_string(&received_at).unwrap(),
-                                    is_read,
-                                    serde_json::to_string(&account_id).unwrap(),
-                                    serde_json::to_string(&account_email).unwrap(),
-                                ))
+                                let cats: Vec<serde_json::Value> = omarchylook::db::categories_from_json(row.get::<_, Option<String>>(12)?.as_deref())
+                                    .into_iter()
+                                    .map(|name| {
+                                        let color = cat_colors.get(&(account_id.clone(), name.to_lowercase())).cloned()
+                                            .unwrap_or_else(|| omarchylook::models::fallback_category_color(&name).to_string());
+                                        serde_json::json!([name, color])
+                                    })
+                                    .collect();
+                                Ok(serde_json::json!({
+                                    "id": row.get::<_, String>(0)?,
+                                    "subject": row.get::<_, String>(1)?,
+                                    "from_email": row.get::<_, String>(2)?,
+                                    "from_name": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                                    "received_at": row.get::<_, String>(4)?,
+                                    "is_read": row.get::<_, bool>(5)?,
+                                    "account_id": account_id,
+                                    "account_email": row.get::<_, String>(7)?,
+                                    "to_text": row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                                    "cc_text": row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                                    "bcc_text": row.get::<_, Option<String>>(10)?.unwrap_or_default(),
+                                    "sent_at": row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                                    // JSON text: [["Name","#rrggbb"],…] (a list model cannot hold nested lists cheaply)
+                                    "cats": serde_json::Value::Array(cats).to_string(),
+                                    "importance": row.get::<_, Option<String>>(13)?.unwrap_or_default(),
+                                    "has_attachments": row.get::<_, Option<bool>>(14)?.unwrap_or(false),
+                                    "conversation_id": row.get::<_, Option<String>>(15)?.unwrap_or_default(),
+                                }).to_string())
                             };
 
                             // Paged: ?limit= (default 200, max 1000) & ?offset=. The cache holds
@@ -933,7 +1058,9 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                             args.push(offset.into());
                             let sql = format!(
                                 "SELECT m.id, m.subject, m.from_email, m.from_name, m.received_at, m.is_read, \
-                                        COALESCE(m.account_id, ''), COALESCE(a.email, '') \
+                                        COALESCE(m.account_id, ''), COALESCE(a.email, ''), \
+                                        m.to_text, m.cc_text, m.bcc_text, m.sent_at, m.categories, m.importance, \
+                                        m.has_attachments, m.conversation_id \
                                  FROM messages m LEFT JOIN accounts a ON a.id = m.account_id{} \
                                  ORDER BY m.received_at DESC LIMIT ?{} OFFSET ?{}",
                                 where_sql, args.len() - 1, args.len()

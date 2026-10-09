@@ -16,9 +16,9 @@ use crate::models::{EmailMessage, MailFolder};
 use async_trait::async_trait;
 use base64::Engine;
 use log::{debug, warn};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const BASE: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
 const PAGE_SIZE: usize = 100;
@@ -39,9 +39,39 @@ pub struct GmailProvider {
     api: Arc<GoogleApi>,
     /// Cache database, used only to skip messages that are already stored.
     db_path: Option<PathBuf>,
+    /// User labels by raw id -> name, from `labels.list`. A message's tags are its user labels;
+    /// the map turns ids into the names the rest of the app uses.
+    labels: Arc<Mutex<HashMap<String, String>>>,
 }
 
 // ───────────────────────────────────────────────────────────── pure parsing
+
+/// `"Name" <a@b.com>` → `Name`; None when the header has no display name.
+pub(crate) fn name_of(from_header: &str) -> Option<String> {
+    let h = from_header.trim();
+    let l = h.rfind('<')?;
+    let name = h[..l].trim().trim_matches('"').trim();
+    if name.is_empty() { None } else { Some(name.to_string()) }
+}
+
+/// Header value with runs of whitespace (folded lines) collapsed; None when empty.
+fn header_text(msg: &serde_json::Value, name: &str) -> Option<String> {
+    header(msg, name)
+        .map(|v| v.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|s| !s.is_empty())
+}
+
+/// `Importance: high` / `X-Priority: 1` → "high" | "low" | "normal".
+fn importance_of(msg: &serde_json::Value) -> String {
+    if let Some(i) = header(msg, "Importance").map(|v| v.trim().to_lowercase()) {
+        if i == "high" || i == "low" { return i; }
+    }
+    match header(msg, "X-Priority").and_then(|v| v.trim().chars().next()) {
+        Some('1') | Some('2') => "high".into(),
+        Some('4') | Some('5') => "low".into(),
+        _ => "normal".into(),
+    }
+}
 
 /// `"Name" <a@b.com>` / `a@b.com` → `a@b.com`
 pub(crate) fn address_of(from_header: &str) -> String {
@@ -59,7 +89,7 @@ fn header<'a>(msg: &'a serde_json::Value, name: &str) -> Option<&'a str> {
 }
 
 /// Gmail message resource (format=metadata) → `EmailMessage` stored under `folder_id`.
-pub(crate) fn parse_message(account_id: &str, folder_id: &str, msg: &serde_json::Value) -> Option<EmailMessage> {
+pub(crate) fn parse_message(account_id: &str, folder_id: &str, msg: &serde_json::Value, labels: &HashMap<String, String>) -> Option<EmailMessage> {
     let raw_id = msg["id"].as_str().filter(|s| !s.is_empty())?;
     let received = msg["internalDate"]
         .as_str()
@@ -76,6 +106,23 @@ pub(crate) fn parse_message(account_id: &str, folder_id: &str, msg: &serde_json:
         body: msg["snippet"].as_str().unwrap_or("").to_string(),
         folder_id: Some(folder_id.to_string()),
         is_read: !unread,
+        meta: true,
+        from_name: header(msg, "From").and_then(name_of),
+        to_text: header_text(msg, "To"),
+        cc_text: header_text(msg, "Cc"),
+        bcc_text: header_text(msg, "Bcc"),
+        // Tags = the user's own labels on the message (system labels are folders / flags).
+        categories: Some(msg["labelIds"].as_array().into_iter().flatten()
+            .filter_map(|l| l.as_str())
+            .filter_map(|id| labels.get(id).cloned())
+            .collect()),
+        sent_at: header(msg, "Date")
+            .and_then(|d| chrono::DateTime::parse_from_rfc2822(d.trim()).ok())
+            .map(|d| d.with_timezone(&chrono::Utc).format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+        importance: Some(importance_of(msg)),
+        // A mixed multipart message is how mail with attachments is built.
+        has_attachments: msg["payload"]["mimeType"].as_str().map(|m| m.starts_with("multipart/mixed")),
+        conversation_id: msg["threadId"].as_str().map(String::from),
     })
 }
 
@@ -137,7 +184,30 @@ pub(crate) fn extract_body(payload: &serde_json::Value) -> (String, String) {
 
 impl GmailProvider {
     pub fn new(account_id: &str, db_path: Option<PathBuf>) -> Self {
-        Self { account_id: account_id.to_string(), api: Arc::new(GoogleApi::new(account_id)), db_path }
+        Self { account_id: account_id.to_string(), api: Arc::new(GoogleApi::new(account_id)), db_path, labels: Arc::new(Mutex::new(HashMap::new())) }
+    }
+
+    /// Remember user labels (raw id -> name) from a `labels.list` response.
+    fn remember_labels(&self, labels: &serde_json::Value) {
+        let map: HashMap<String, String> = labels["labels"].as_array().into_iter().flatten()
+            .filter(|l| l["type"].as_str() == Some("user"))
+            .filter_map(|l| Some((l["id"].as_str()?.to_string(), l["name"].as_str()?.to_string())))
+            .collect();
+        *self.labels.lock().unwrap_or_else(|p| p.into_inner()) = map;
+    }
+
+    /// Load the label names once if nothing has fetched folders yet.
+    async fn ensure_labels(&self) {
+        if !self.labels.lock().unwrap_or_else(|p| p.into_inner()).is_empty() { return; }
+        match self.api.get(&format!("{}/labels", BASE)).await {
+            Ok(json) => self.remember_labels(&json),
+            Err(e) => warn!("Gmail: could not read labels: {}", e),
+        }
+    }
+
+    fn label_id_for(&self, name: &str) -> Option<String> {
+        self.labels.lock().unwrap_or_else(|p| p.into_inner()).iter()
+            .find(|(_, n)| n.eq_ignore_ascii_case(name)).map(|(id, _)| id.clone())
     }
 
     fn label_of(&self, folder_id: &str) -> String {
@@ -176,14 +246,15 @@ impl GmailProvider {
             for id in chunk {
                 let api = Arc::clone(&self.api);
                 let url = format!(
-                    "{}/messages/{}?format=metadata&metadataHeaders=From&metadataHeaders=Subject",
+                    "{}/messages/{}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Bcc&metadataHeaders=Date&metadataHeaders=Importance&metadataHeaders=X-Priority",
                     BASE, urlencoding::encode(id)
                 );
                 set.spawn(async move { api.get(&url).await });
             }
+            let labels = self.labels.lock().unwrap_or_else(|p| p.into_inner()).clone();
             while let Some(res) = set.join_next().await {
                 match res {
-                    Ok(Ok(json)) => out.extend(parse_message(&self.account_id, folder_id, &json)),
+                    Ok(Ok(json)) => out.extend(parse_message(&self.account_id, folder_id, &json, &labels)),
                     Ok(Err(e)) => warn!("Gmail: skipping a message that could not be fetched: {}", e),
                     Err(e) => warn!("Gmail: fetch task failed: {}", e),
                 }
@@ -334,6 +405,7 @@ impl super::EmailProvider for GmailProvider {
 
     async fn fetch_folders(&self) -> Result<Vec<MailFolder>> {
         let labels = self.api.get(&format!("{}/labels", BASE)).await?;
+        self.remember_labels(&labels);
         // Counts need one `labels.get` per shown label; fetch them up front.
         let mut counts = std::collections::HashMap::new();
         for l in labels["labels"].as_array().into_iter().flatten() {
@@ -348,6 +420,66 @@ impl super::EmailProvider for GmailProvider {
             }
         }
         Ok(parse_labels(&self.account_id, &labels, &|id| counts.get(id).copied().unwrap_or((None, None))))
+    }
+
+    async fn fetch_categories(&self) -> Result<Vec<crate::models::CategoryDef>> {
+        let labels = self.api.get(&format!("{}/labels", BASE)).await?;
+        self.remember_labels(&labels);
+        Ok(labels["labels"].as_array().into_iter().flatten()
+            .filter(|l| l["type"].as_str() == Some("user"))
+            .filter_map(|l| {
+                let name = l["name"].as_str()?.to_string();
+                let bg = l["color"]["backgroundColor"].as_str().map(String::from);
+                Some(crate::models::CategoryDef {
+                    color: bg.clone().unwrap_or_else(|| crate::models::fallback_category_color(&name).to_string()),
+                    name,
+                    provider_color: bg,
+                })
+            })
+            .collect())
+    }
+
+    async fn create_category(&self, name: &str, color: &crate::models::PaletteColor) -> Result<crate::models::CategoryDef> {
+        let body = serde_json::json!({
+            "name": name,
+            "labelListVisibility": "labelShow",
+            "messageListVisibility": "show",
+            "color": { "backgroundColor": color.gmail_bg, "textColor": color.gmail_fg },
+        });
+        let created = self.api.post(&format!("{}/labels", BASE), &body).await?;
+        if let (Some(id), Some(n)) = (created["id"].as_str(), created["name"].as_str()) {
+            self.labels.lock().unwrap_or_else(|p| p.into_inner()).insert(id.to_string(), n.to_string());
+        }
+        Ok(crate::models::CategoryDef { name: name.to_string(), color: color.gmail_bg.to_string(), provider_color: Some(color.gmail_bg.to_string()) })
+    }
+
+    async fn set_message_categories(&self, id: &str, wanted: &[String], had: &[String]) -> Result<()> {
+        self.ensure_labels().await;
+        let lookup = |names: &[String], skip: &[String]| -> Vec<String> {
+            names.iter()
+                .filter(|n| !skip.iter().any(|s| s.eq_ignore_ascii_case(n)))
+                .filter_map(|n| self.label_id_for(n))
+                .collect()
+        };
+        let add = lookup(wanted, had);
+        let remove = lookup(had, wanted);
+        if add.is_empty() && remove.is_empty() { return Ok(()); }
+        let raw = unscoped(&self.account_id, id);
+        self.api
+            .post(&format!("{}/messages/{}/modify", BASE, urlencoding::encode(raw)),
+                  &serde_json::json!({"addLabelIds": add, "removeLabelIds": remove}))
+            .await
+            .map(|_| ())
+    }
+
+    fn repopulates_meta_per_message(&self) -> bool {
+        true
+    }
+
+    async fn fetch_message_meta(&self, ids: &[String]) -> Vec<EmailMessage> {
+        self.ensure_labels().await;
+        let raw: Vec<String> = ids.iter().map(|i| unscoped(&self.account_id, i).to_string()).collect();
+        self.fetch_metadata("", raw).await
     }
 
     async fn is_token_valid(&self) -> Result<bool> {
@@ -374,24 +506,24 @@ mod tests {
             "id": "18f3a", "labelIds": ["INBOX", "UNREAD"], "snippet": "hello there", "internalDate": "1790000000000",
             "payload": {"headers": [{"name": "From", "value": "Ada <ada@example.com>"}, {"name": "subject", "value": " Lunch? "}]}
         });
-        let m = parse_message("gmail-aaaaaa", "gmail-aaaaaa:INBOX", &msg).unwrap();
+        let m = parse_message("gmail-aaaaaa", "gmail-aaaaaa:INBOX", &msg, &HashMap::new()).unwrap();
         assert_eq!(m.id, "gmail-aaaaaa:18f3a");
         assert_eq!((m.from.as_str(), m.subject.as_str(), m.body.as_str()), ("ada@example.com", "Lunch?", "hello there"));
         assert!(!m.is_read);
         assert_eq!(m.folder_id.as_deref(), Some("gmail-aaaaaa:INBOX"));
         assert!(m.received.ends_with('Z') && m.received.starts_with("2026-"), "{}", m.received);
         // read when UNREAD is absent; missing headers get safe defaults; no id → no message
-        let read = parse_message("a-1", "f", &json!({"id": "x", "labelIds": ["INBOX"]})).unwrap();
+        let read = parse_message("a-1", "f", &json!({"id": "x", "labelIds": ["INBOX"]}), &HashMap::new()).unwrap();
         assert!(read.is_read);
         assert_eq!((read.subject.as_str(), read.from.as_str()), ("(no subject)", "unknown@example.com"));
-        assert!(parse_message("a-1", "f", &json!({})).is_none());
+        assert!(parse_message("a-1", "f", &json!({}), &HashMap::new()).is_none());
     }
 
     #[test]
     fn same_gmail_id_in_two_accounts_stays_distinct() {
         let msg = json!({"id": "same"});
-        let a = parse_message("gmail-aaaaaa", "f", &msg).unwrap();
-        let b = parse_message("gmail-bbbbbb", "f", &msg).unwrap();
+        let a = parse_message("gmail-aaaaaa", "f", &msg, &HashMap::new()).unwrap();
+        let b = parse_message("gmail-bbbbbb", "f", &msg, &HashMap::new()).unwrap();
         assert_ne!(a.id, b.id);
     }
 
@@ -427,5 +559,36 @@ mod tests {
         let only_text = json!({"mimeType": "text/plain", "body": {"data": enc("just text ✓")}});
         assert_eq!(extract_body(&only_text), ("text".to_string(), "just text ✓".to_string()));
         assert_eq!(extract_body(&json!({})).1, "");
+    }
+
+    #[test]
+    fn gmail_message_details_are_parsed() {
+        let msg = json!({
+            "id": "18f3a", "threadId": "t77", "labelIds": ["INBOX", "Label_12", "Label_99", "IMPORTANT"], "snippet": "x",
+            "internalDate": "1790000000000",
+            "payload": {"mimeType": "multipart/mixed", "headers": [
+                {"name": "From", "value": "\"Ada Lovelace\" <ada@example.com>"},
+                {"name": "Subject", "value": "Lunch?"},
+                {"name": "To", "value": "Bob <bob@x.org>,\r\n cy@x.org"},
+                {"name": "Cc", "value": "dee@x.org"},
+                {"name": "Date", "value": "Tue, 6 Oct 2026 12:00:00 +0000"},
+                {"name": "X-Priority", "value": "1 (Highest)"}
+            ]}
+        });
+        let mut labels = HashMap::new();
+        labels.insert("Label_12".to_string(), "Work".to_string());
+        let m = parse_message("gmail-aaaaaa", "gmail-aaaaaa:INBOX", &msg, &labels).unwrap();
+        assert!(m.meta);
+        assert_eq!(m.from_name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(m.to_text.as_deref(), Some("Bob <bob@x.org>, cy@x.org"));
+        assert_eq!(m.cc_text.as_deref(), Some("dee@x.org"));
+        assert_eq!(m.bcc_text, None);
+        assert_eq!(m.categories, Some(vec!["Work".to_string()]), "only known user labels become tags");
+        assert_eq!(m.importance.as_deref(), Some("high"));
+        assert_eq!(m.has_attachments, Some(true));
+        assert_eq!(m.conversation_id.as_deref(), Some("t77"));
+        assert_eq!(m.sent_at.as_deref(), Some("2026-10-06T12:00:00Z"));
+        assert_eq!(name_of("a@b.com"), None);
+        assert_eq!(name_of("<a@b.com>"), None);
     }
 }
