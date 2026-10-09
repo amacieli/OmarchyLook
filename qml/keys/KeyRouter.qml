@@ -33,9 +33,12 @@ Item {
     var m = e.modifiers
     if (m & (Qt.AltModifier | Qt.MetaModifier)) return ""
     if (m & Qt.ControlModifier) {
-      if (e.key >= Qt.Key_A && e.key <= Qt.Key_Z) return "C-" + String.fromCharCode(e.key + 32)
+      var prefix = (m & Qt.ShiftModifier) ? "C-S-" : "C-"
+      if (e.key >= Qt.Key_A && e.key <= Qt.Key_Z) return prefix + String.fromCharCode(e.key + 32)
+      if (e.key >= Qt.Key_0 && e.key <= Qt.Key_9) return prefix + String.fromCharCode(e.key)
       return ""
     }
+    if (e.key >= Qt.Key_F1 && e.key <= Qt.Key_F12) return "F" + (e.key - Qt.Key_F1 + 1)
     switch (e.key) {
       case Qt.Key_Escape:    return "Esc"
       case Qt.Key_Tab:       return "Tab"
@@ -51,6 +54,8 @@ Item {
       case Qt.Key_PageDown:  return "PgDown"
       case Qt.Key_Home:      return "Home"
       case Qt.Key_End:       return "End"
+      case Qt.Key_Delete:    return "Delete"
+      case Qt.Key_Backspace: return "Backspace"
     }
     return (e.text.length === 1 && e.text > " ") ? e.text : ""
   }

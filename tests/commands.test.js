@@ -29,3 +29,27 @@ eq(C2.findEx([{id:'a',ex:['q','quit'],keys:[]}],'quit').id,'a','findEx'); eq(C2.
 const g=C2.grouped([{scope:'global',keys:['j']},{scope:'mail',keys:['r']},{scope:'mail',keys:[],id:'x'},{scope:'tasks/list',keys:['f']}],['mail']);
 eq(g[0].scope,'mail','active first'); eq(g[0].commands.length,1,'keyless omitted'); eq(g.length,3,'groups');
 console.log('ok2');
+const C3=new Function(fs.readFileSync('qml/keys/Commands.js','utf8').replace('.pragma library','')+';return {applyBindings,normKey,normToken,presets}')();
+eq(C3.normKey('Ctrl-r'),'C-r','norm ctrl'); eq(C3.normKey('ctrl-shift-v'),'C-S-v','norm cs'); eq(C3.normKey('g  m'),'g m','chord');
+eq(C3.normKey('PageUp'),'PgUp','pgup'); eq(C3.normKey('f9'),'F9','f9'); eq(C3.normKey('banana'),null,'bad'); eq(C3.normKey('C-1'),'C-1','digit');
+const base=[
+ {id:'mail.archive',scope:'mail',keys:['a'],title:'Archive'},
+ {id:'mail.reply',scope:'mail',keys:['r'],title:'Reply'},
+ {id:'go.mail',scope:'global',keys:['g m'],title:'Mail'},
+ {id:'item.delete',scope:'global',keys:['x'],title:'Delete'},
+ {id:'g1',scope:'global',keys:['g g'],title:'Top'},
+];
+let r=C3.applyBindings(base,{});
+eq(r.problems.length,0,'defaults clean'); eq(r.commands[0].keys[0],'a','default key'); eq(r.commands[0].custom,undefined,'not custom');
+r=C3.applyBindings(base,{bindings:{'mail.archive':['e'],'item.delete':[]}});
+eq(r.commands[0].keys.join(),'e','replaced'); eq(r.commands[0].custom,true,'custom'); eq(r.commands[3].keys.length,0,'unbound'); eq(r.problems.length,0,'no problems');
+r=C3.applyBindings(base,{preset:'outlook'});
+eq(r.commands[1].keys.join(),'r,C-r','preset adds'); eq(r.commands[3].keys.join(),'x,Delete','preset adds delete');
+r=C3.applyBindings(base,{bindings:{'mail.archive':['r']}});
+eq(r.problems.length,1,'same-scope duplicate'); 
+r=C3.applyBindings(base,{bindings:{'nope':['q'],'mail.reply':['Hyper-z']},preset:'zzz'});
+eq(r.problems.length,3,'unknown id, bad key, unknown preset');
+r=C3.applyBindings(base,{bindings:{'go.mail':['g']}});
+eq(r.problems.length,1,'chord prefix hides chord'); 
+r=C3.applyBindings(base,{error:'settings.toml: bad'}); eq(r.problems[0],'settings.toml: bad','parse error surfaced');
+console.log('ok3');

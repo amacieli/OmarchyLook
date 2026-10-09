@@ -33,6 +33,7 @@ FocusScope {
   AppCommands {
     id: commands
     app: appState
+    config: appState.keyConfig
     content: contentLoader.item
     folderPageRows: folderBar.pageRows
     onPaletteRequested: function(prefill) { palette.show(prefill) }
@@ -44,7 +45,7 @@ FocusScope {
     id: palette
     anchors.fill: parent
     z: 950
-    commands: commands.list
+    commands: commands.effective
     scopes: keyCatcher.scopes
     onClosed: root.focusKeys()
   }
@@ -53,7 +54,9 @@ FocusScope {
     id: help
     anchors.fill: parent
     z: 960
-    commands: commands.list
+    commands: commands.effective
+    problems: commands.problems
+    preset: appState.keyConfig.preset
     scopes: keyCatcher.scopes
     onClosed: root.focusKeys()
   }
@@ -61,7 +64,7 @@ FocusScope {
   KeyRouter {
     id: keyCatcher
     anchors.fill: parent
-    commands: commands.list
+    commands: commands.effective
 
     // Innermost first: the pane, "<view>/<pane>", the view, then everything.
     readonly property string paneScope: appState.focusPane === "msg" ? "list" : appState.focusPane
@@ -179,6 +182,7 @@ FocusScope {
         pendingOptions: keyCatcher.pendingOptions
         notice: commands.notice
         markCount: appState.markCount
+        keyOf: commands.keyOf
       }
     }
 

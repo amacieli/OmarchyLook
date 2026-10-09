@@ -53,7 +53,7 @@ function fuzzy(query, text) {
 }
 
 function keyLabel(keys) {
-  return keys.map(function(k) { return k.replace(/^C-/, "Ctrl-").replace(/^S-/, "Shift-") }).join("  ")
+  return keys.map(function(k) { return k.replace(/^C-S-/, "Ctrl-Shift-").replace(/^C-/, "Ctrl-").replace(/^S-/, "Shift-") }).join("  ")
 }
 
 // ":goto calendar" / "goto calendar" -> { name: "goto", arg: "calendar" }; null when empty.
@@ -87,8 +87,110 @@ function grouped(commands, first) {
   for (var i = 0; i < commands.length; i++) if (order.indexOf(commands[i].scope) < 0) order.push(commands[i].scope)
   var out = []
   for (var s = 0; s < order.length; s++) {
-    var cs = commands.filter(function(c) { return c.scope === order[s] && !c.hidden && c.keys.length > 0 && (!c.when || c.when()) })
+    var cs = commands.filter(function(c) { return c.scope === order[s] && !c.hidden && c.keys.length > 0 && (!c.helpWhen || c.helpWhen()) })
     if (cs.length) out.push({ scope: order[s], name: sectionName(order[s]), active: first.indexOf(order[s]) >= 0, commands: cs })
   }
   return out
+}
+
+// ---------------------------------------------------------------------------------------
+// User key configuration ([keys] in settings.toml)
+// ---------------------------------------------------------------------------------------
+
+var NAMED = {
+  esc: "Esc", escape: "Esc", tab: "Tab", "s-tab": "S-Tab", "shift-tab": "S-Tab", backtab: "S-Tab",
+  enter: "Enter", return: "Enter", space: "Space", up: "Up", down: "Down", left: "Left", right: "Right",
+  pgup: "PgUp", pageup: "PgUp", pgdown: "PgDown", pagedown: "PgDown", home: "Home", end: "End",
+  delete: "Delete", del: "Delete", backspace: "Backspace"
+}
+
+// "Ctrl-r" -> "C-r", "ctrl-shift-v" -> "C-S-v", "PageUp" -> "PgUp"; null when it is not a key.
+function normToken(t) {
+  if (t.length === 1) return t > " " ? t : null
+  var lower = t.toLowerCase()
+  var m = /^(?:c|ctrl)-(?:(s|shift)-)?([a-z0-9])$/.exec(lower)
+  if (m) return "C-" + (m[1] ? "S-" : "") + m[2]
+  if (NAMED[lower]) return NAMED[lower]
+  m = /^f([1-9]|1[0-2])$/.exec(lower)
+  if (m) return "F" + m[1]
+  return null
+}
+
+// "g  m" -> "g m"; null when any token is not a key.
+function normKey(seq) {
+  var parts = String(seq).split(/\s+/).filter(function(p) { return p !== "" })
+  if (parts.length === 0) return null
+  var out = []
+  for (var i = 0; i < parts.length; i++) {
+    var n = normToken(parts[i])
+    if (n === null) return null
+    out.push(n)
+  }
+  return out.join(" ")
+}
+
+// Extra bindings a preset adds on top of the defaults (vim keys keep working).
+var presets = {
+  outlook: {
+    "mail.reply": ["C-r"], "mail.replyall": ["C-S-r"], "mail.forward": ["C-f"],
+    "item.delete": ["Delete"], "mail.archive": ["Backspace"], "mail.read": ["C-q"],
+    "mail.move": ["C-S-v"], "mail.undo": ["C-z"], "app.sync": ["F9"],
+    "go.mail": ["C-1"], "go.calendar": ["C-2"], "go.people": ["C-3"], "go.tasks": ["C-4"]
+  }
+}
+
+// Apply { preset, bindings: { id: [keys] }, error } to the default registry.
+// A preset adds keys; a binding for an id REPLACES that command's keys ([] unbinds it).
+// Returns { commands, problems } where problems are human-readable strings (bad keys,
+// unknown ids, two commands on one key in the same scope).
+function applyBindings(commands, config) {
+  var problems = []
+  config = config || {}
+  if (config.error) problems.push(config.error)
+  var preset = config.preset ? String(config.preset).toLowerCase() : ""
+  var extra = {}
+  if (preset !== "" && preset !== "default") {
+    if (presets[preset]) extra = presets[preset]
+    else problems.push("unknown preset '" + config.preset + "' (known: default, " + Object.keys(presets).join(", ") + ")")
+  }
+  var overrides = config.bindings || {}
+  var known = {}
+  commands.forEach(function(c) { known[c.id] = true })
+  Object.keys(overrides).forEach(function(id) { if (!known[id]) problems.push("unknown command '" + id + "'") })
+
+  var out = commands.map(function(c) {
+    var n = {}
+    for (var k in c) n[k] = c[k]
+    var keys = c.keys.slice()
+    if (extra[c.id]) extra[c.id].forEach(function(k) { if (keys.indexOf(k) < 0) keys.push(k) })
+    if (overrides[c.id] !== undefined) {
+      keys = []
+      overrides[c.id].forEach(function(raw) {
+        var nk = normKey(raw)
+        if (nk === null) problems.push(c.id + ": '" + raw + "' is not a key (use e.g. j, G, g m, C-r, C-S-v, Tab, F9)")
+        else if (keys.indexOf(nk) < 0) keys.push(nk)
+      })
+      n.custom = true
+    }
+    n.keys = keys
+    return n
+  })
+
+  // Conflicts: same scope, same key (or one key is the start of another's chord).
+  // Commands with a `when` guard share keys on purpose.
+  var byScope = {}
+  out.forEach(function(c) { if (c.keys.length && !c.when) (byScope[c.scope] = byScope[c.scope] || []).push(c) })
+  Object.keys(byScope).forEach(function(scope) {
+    var list = byScope[scope]
+    for (var i = 0; i < list.length; i++) for (var j = i + 1; j < list.length; j++) {
+      list[i].keys.forEach(function(a) {
+        list[j].keys.forEach(function(b) {
+          if (a === b) problems.push("'" + a + "' is bound to both " + list[i].id + " and " + list[j].id + " (" + sectionName(scope) + ")")
+          else if (b.indexOf(a + " ") === 0 || a.indexOf(b + " ") === 0)
+            problems.push("'" + (a.length < b.length ? a : b) + "' (" + (a.length < b.length ? list[i].id : list[j].id) + ") hides the chord '" + (a.length < b.length ? b : a) + "' (" + (a.length < b.length ? list[j].id : list[i].id) + ")")
+        })
+      })
+    }
+  })
+  return { commands: out, problems: problems }
 }

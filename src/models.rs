@@ -221,6 +221,69 @@ pub struct Settings {
     /// Absent in settings files written before this section existed.
     #[serde(default)]
     pub mail: MailSettings,
+    /// Keyboard bindings (`[keys]`): kept in the struct so rewrites of settings.toml by other
+    /// settings (sidebar, folder pane, send delay…) never drop what the user wrote there.
+    #[serde(default)]
+    pub keys: KeySettings,
+}
+
+/// `[keys]` in settings.toml. `preset` adds a family of extra bindings ("outlook"); every other
+/// entry rebinds one command: `"mail.archive" = "e"`, `"move.down" = ["j", "Down"]`, `"x" = []`
+/// to unbind. The command ids are the ones the `?` help overlay shows. The UI interprets these;
+/// the backend only stores and serves them.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+pub struct KeySettings {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub preset: String,
+    #[serde(flatten)]
+    pub bindings: std::collections::BTreeMap<String, KeyBinding>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(untagged)]
+pub enum KeyBinding {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl KeyBinding {
+    pub fn keys(&self) -> Vec<String> {
+        match self {
+            KeyBinding::One(k) if k.is_empty() => Vec::new(),
+            KeyBinding::One(k) => vec![k.clone()],
+            KeyBinding::Many(v) => v.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod key_settings_tests {
+    use super::*;
+
+    #[test]
+    fn keys_table_round_trips_beside_the_other_settings() {
+        let mut base = Settings::default();
+        base.keys.preset = "outlook".into();
+        base.keys.bindings.insert("mail.archive".into(), KeyBinding::One("e".into()));
+        base.keys.bindings.insert("move.down".into(), KeyBinding::Many(vec!["j".into(), "Down".into()]));
+        base.keys.bindings.insert("item.delete".into(), KeyBinding::Many(vec![]));
+        let text = toml::to_string_pretty(&base).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back.keys, base.keys, "{}", text);
+        // a file without [keys] still loads
+        let plain = toml::to_string_pretty(&Settings::default()).unwrap().replace("[keys]", "");
+        assert!(toml::from_str::<Settings>(&plain).unwrap().keys.bindings.is_empty());
+    }
+
+    #[test]
+    fn hand_written_keys_parse() {
+        let mut s = toml::to_string_pretty(&Settings::default()).unwrap().replace("[keys]\n", "");
+        s.push_str("\n[keys]\npreset = \"outlook\"\n\"go.mail\" = \"g m\"\n\"mail.move\" = [\"m\", \"C-S-v\"]\n\"item.delete\" = \"\"\n");
+        let st: Settings = toml::from_str(&s).unwrap();
+        assert_eq!(st.keys.preset, "outlook");
+        assert_eq!(st.keys.bindings["mail.move"].keys(), vec!["m", "C-S-v"]);
+        assert!(st.keys.bindings["item.delete"].keys().is_empty());
+    }
 }
 
 /// Mail behaviour settings (`[mail]` in settings.toml).
@@ -372,6 +435,7 @@ impl Default for Settings {
             },
             calendar: CalendarSettings::default(),
             mail: MailSettings::default(),
+            keys: KeySettings::default(),
         }
     }
 }

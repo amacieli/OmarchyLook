@@ -856,6 +856,27 @@ Item {
 
   onSelectedFolderIdChanged: { clearMarks(); loadMessages() }
 
+  // ---- keyboard bindings ([keys] in settings.toml) ---------------------------------------
+  // Polled: the backend serves the table with the file's mtime as `serial`, so editing
+  // settings.toml rebinds keys within a couple of seconds, no restart.
+  property var keyConfig: ({ preset: "", bindings: ({}), error: "" })
+  property string _keySerial: ""
+  function loadKeyConfig() {
+    request("GET", "/settings/keys", function(xhr) {
+      if (xhr.status !== 200) return
+      try {
+        var d = JSON.parse(xhr.responseText)
+        if (d.serial === root._keySerial) return
+        root._keySerial = d.serial
+        root.keyConfig = { preset: d.preset || "", bindings: d.bindings || ({}), error: d.error || "" }
+      } catch (e) { console.log("[Keys] parse error:", e) }
+    })
+  }
+  Timer {
+    interval: 2000; repeat: true; running: root.backendOnline; triggeredOnStart: true
+    onTriggered: root.loadKeyConfig()
+  }
+
   // ---- folder pane ------------------------------------------------------------------------
   // Off by default: folders are reached with the folder picker (`g f`), and the message list
   // titles itself with the folder (and account). `F` brings the pane back.

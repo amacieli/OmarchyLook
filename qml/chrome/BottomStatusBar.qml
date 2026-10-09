@@ -22,17 +22,21 @@ Item {
   property var pendingOptions: []
   property string notice: ""
   property int markCount: 0
+  // keyOf(commandId) -> the key currently bound to it, so hints follow rebinding.
+  property var keyOf: function(id) { return "" }
+  function k(id, label) { var key = keyOf(id); return key === "" ? "" : key + " " + label }
+  function hintLine(parts) { return parts.filter(function(p) { return p !== "" }).join("   ") }
 
   // Hints for the focused pane. ":" always opens the full command list.
   readonly property string hints: {
-    if (focusPane === "nav")    return "j/k move   l open   tab next pane   g go to"
-    if (focusPane === "folder") return "j/k move   l select   h back   tab next pane"
-    if (focusPane === "reader") return "j/k scroll   space page   r reply   h back"
-    if (currentView === "settings") return "j/k category   h back   tab next pane"
-    if (currentView === "mail") return "j/k move   l read   r reply   a archive   x delete   m move   v mark   z read/unread"
-    if (currentView === "calendar") return "j/k period   t today   d/w/m view   tab next pane"
-    if (currentView === "tasks") return "j/k move   space done   f filter   tab next pane"
-    return "j/k move   h back   tab next pane"
+    if (focusPane === "nav")    return hintLine([k("move.down", "move") , k("move.right", "open"), k("pane.next", "next pane"), k("go.mail", "go to…")])
+    if (focusPane === "folder") return hintLine([k("move.down", "move"), k("move.right", "select"), k("move.left", "back"), k("pane.next", "next pane")])
+    if (focusPane === "reader") return hintLine([k("move.down", "scroll"), k("reader.pagedown", "page"), k("mail.reply", "reply"), k("move.left", "back")])
+    if (currentView === "settings") return hintLine([k("move.down", "category"), k("move.left", "back"), k("pane.next", "next pane")])
+    if (currentView === "mail") return hintLine([k("move.down", "move"), k("move.right", "read"), k("mail.reply", "reply"), k("mail.archive", "archive"), k("item.delete", "delete"), k("mail.move", "move"), k("mail.mark", "mark"), k("mail.read", "read/unread")])
+    if (currentView === "calendar") return hintLine([k("cal.next", "period"), k("cal.today", "today"), k("cal.month", "month"), k("pane.next", "next pane")])
+    if (currentView === "tasks") return hintLine([k("move.down", "move"), k("item.activate", "done"), k("tasks.filter", "filter"), k("pane.next", "next pane")])
+    return hintLine([k("move.down", "move"), k("move.left", "back"), k("pane.next", "next pane")])
   }
 
   // While a chord is half typed ("g"), show what can follow instead of the hints.
@@ -85,7 +89,7 @@ Item {
     }
 
     UiText {
-      text: "  :  commands   ?  help"
+      text: "  " + (root.keyOf("palette") || ":") + "  commands   " + (root.keyOf("help") || "?") + "  help"
       color: Color.accent
       font.pixelSize: Style.font.caption
       font.bold: true

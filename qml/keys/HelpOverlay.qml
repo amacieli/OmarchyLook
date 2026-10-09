@@ -12,6 +12,8 @@ FocusScope {
 
   property var commands: []
   property var scopes: ["global"]
+  property var problems: []
+  property string preset: ""
   property bool open: false
 
   signal closed()
@@ -41,7 +43,7 @@ FocusScope {
 
   Rectangle {
     anchors.centerIn: parent
-    width: Math.min(parent.width - Style.space(60), Style.space(760))
+    width: Math.min(parent.width - Style.space(60), Style.space(900))
     height: parent.height - Style.space(80)
     color: Color.background
     border.width: 2
@@ -80,6 +82,37 @@ FocusScope {
         width: flick.width
         spacing: Style.spacing.lg
 
+        // Key configuration: preset in use and anything wrong in [keys].
+        Column {
+          width: body.width
+          spacing: Style.spacing.xs
+          visible: root.problems.length > 0 || (root.preset !== "" && root.preset !== "default")
+
+          UiText {
+            text: "Key configuration" + (root.preset !== "" ? "   preset: " + root.preset : "")
+            font.bold: true
+            foreground: root.problems.length > 0 ? Color.urgent : Color.accent
+          }
+          Rectangle { width: parent.width; height: 1; color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.2) }
+          Repeater {
+            model: root.problems
+            UiText {
+              required property string modelData
+              width: body.width
+              text: "\u2022 " + modelData
+              wrapMode: Text.WordWrap
+              foreground: Color.urgent
+              font.pixelSize: Style.font.caption
+            }
+          }
+          UiText {
+            visible: root.problems.length === 0
+            text: "No problems in [keys]."
+            dim: true
+            font.pixelSize: Style.font.caption
+          }
+        }
+
         Repeater {
           model: root.groups
 
@@ -106,7 +139,12 @@ FocusScope {
                   foreground: Color.accent
                   elide: Text.ElideRight
                 }
-                UiText { text: modelData.title + (modelData.ex ? "   :" + modelData.ex[0] : ""); dim: false }
+                UiText {
+                  width: Style.space(330)
+                  elide: Text.ElideRight
+                  text: modelData.title + (modelData.ex ? "   :" + modelData.ex[0] : "") + (modelData.custom ? "   (custom)" : "")
+                }
+                UiText { text: modelData.id; dim: true; font.pixelSize: Style.font.caption }
               }
             }
           }

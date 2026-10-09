@@ -960,6 +960,38 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                     continue;
                 }
 
+                // ── GET /settings/keys — the `[keys]` table of settings.toml:
+                // {"serial":N,"preset":"","bindings":{"mail.archive":["e"]},"error":""}.
+                // `serial` is the file's mtime; the UI polls this and re-applies when it moves, so
+                // editing settings.toml rebinds keys without a restart. ──
+                if first_line.contains("GET /settings/keys") {
+                    let settings_path = config_dir.join("settings.toml");
+                    let serial: u128 = std::fs::metadata(&settings_path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0);
+                    let body = match std::fs::read_to_string(&settings_path) {
+                        Ok(text) => match toml::from_str::<omarchylook::models::Settings>(&text) {
+                            Ok(st) => {
+                                let bindings: serde_json::Map<String, serde_json::Value> = st.keys.bindings.iter()
+                                    .map(|(k, v)| (k.clone(), serde_json::json!(v.keys())))
+                                    .collect();
+                                serde_json::json!({ "serial": serial.to_string(), "preset": st.keys.preset, "bindings": bindings, "error": "" })
+                            }
+                            Err(e) => serde_json::json!({ "serial": serial.to_string(), "preset": "", "bindings": {}, "error": format!("settings.toml: {}", e) }),
+                        },
+                        Err(_) => serde_json::json!({ "serial": serial.to_string(), "preset": "", "bindings": {}, "error": "" }),
+                    }.to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
+
                 // ── GET /settings/ui — return UI settings as JSON ─────────────
                 if first_line.contains("GET /settings/ui") {
                     let settings_path = config_dir.join("settings.toml");

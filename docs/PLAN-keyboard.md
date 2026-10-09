@@ -108,9 +108,9 @@ Outlook IA). Status: **plan only, nothing built.** Decisions settled in §6.
 - [ ] Calendar: `h/l` day, `j/k` week, `t` today (Q: collides with tag → `T`?), `[`/`]` period, `1/2/3` day/week/month, `c` new event.
 - [ ] People, Tasks (`x`/Space complete), SMS (j/k list, Enter open, `c` new). Today none respond to keys.
 
-### Phase 7 — Configurable bindings
-- [ ] `[keys]` in `settings.toml` (`gm = "goto mail"`), hot-reload like mail-list-views; conflicts reported in `?`.
-- [ ] Optional "Outlook" preset (Ctrl+R reply, Del delete, Ctrl+Shift+M new…) since the note's audience includes non-vim users.
+### Phase 7 — Configurable bindings (BUILT 2026-10-09; reference in docs/KEYS.md)
+- [x] `[keys]` in `settings.toml` (`gm = "goto mail"`), hot-reload like mail-list-views; conflicts reported in `?`.
+- [x] Optional "Outlook" preset (Ctrl+R reply, Del delete, Ctrl+Shift+M new…) since the note's audience includes non-vim users.
 
 ## 4. Architecture notes
 - Router lives in `qml/keys/`; `AppShell` only instantiates it. Pages declare scope via `property string keyScope` and expose
