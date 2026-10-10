@@ -121,11 +121,24 @@ function sanitizeHtml(html, maxWidth, allowRemote) {
   s = s.replace(/<img\b[^>]*>/gi, function(tag) {
     var src = /\bsrc\s*=\s*["']?([^"'\s>]+)/i.exec(tag)
     if (src && /^data:image\//i.test(src[1])) return tag
-    if (src && allowRemote && /^https?:/i.test(src[1])) return tag
     var alt = /\balt\s*=\s*"([^"]*)"|\balt\s*=\s*'([^']*)'/i.exec(tag)
     var text = alt ? (alt[1] || alt[2] || "") : ""
-    if (src && /^https?:/i.test(src[1])) blocked++
+    var remote = src && /^https?:/i.test(src[1])
+    // Qt's Text fetches a remote <img> itself and, when that request finishes or fails after the
+    // text has changed, crashes in QQuickText::resourceRequestFinished (QUrl::resolved, SIGSEGV,
+    // seen 2026-10-10). So Qt is never handed a remote URL, even for allowed senders: the image
+    // becomes a link to open in the browser instead.
+    if (remote && allowRemote) {
+      var label = text.trim() === "" ? "image" : text.trim()
+      var href = decodeEntities(src[1]).replace(/"/g, "%22")
+      return "<a href=\"" + href + "\">[" + escapeHtml(decodeEntities(label)) + "]</a>"
+    }
+    if (remote) blocked++
     return text.trim() === "" ? "" : "[" + escapeHtml(decodeEntities(text.trim())) + "]"
+  })
+  // Qt also loads images named by background= on table/td/body, and by srcset/poster. Drop them from tags.
+  s = s.replace(/<[a-z][^>]*>/gi, function(tag) {
+    return tag.replace(/\s(background|srcset|poster|dynsrc|lowsrc)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
   })
 
   // Qt's table layout shrinks a table with no stated width to its narrowest content

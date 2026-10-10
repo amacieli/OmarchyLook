@@ -9,7 +9,7 @@ import "../common"
 Item {
   id: root
 
-  PaneFrame { focused: root.paneFocused; hotkey: "\u00b9"; title: root.expanded ? "menu" : "" }
+  PaneFrame { tint: Hues.magenta; focused: root.paneFocused; hotkey: "\u00b9"; title: root.expanded ? "menu" : "" }
 
   property var items: []
   property int currentIndex: 0

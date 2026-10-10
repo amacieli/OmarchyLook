@@ -11,7 +11,7 @@ import "format.js" as Fmt
 Item {
   id: root
 
-  PaneFrame { focused: root.paneFocused; hotkey: root.hotkey; title: root.frameTitle !== "" ? root.frameTitle : root.folderName }
+  PaneFrame { tint: Hues.blue; focused: root.paneFocused; hotkey: root.hotkey; title: root.frameTitle !== "" ? root.frameTitle : root.folderName }
 
   property var model
   property string folderName: "Inbox"
@@ -122,7 +122,7 @@ Item {
           anchors.top: parent.top
           anchors.bottom: parent.bottom
           width: Style.space(2)
-          color: Color.accent
+          color: Hues.blue
         }
 
         RowLayout {
@@ -137,7 +137,7 @@ Item {
           UiText {
             visible: row.marked
             text: "\u2713"
-            foreground: Color.accent
+            foreground: Hues.yellow
             font.bold: true
           }
 
@@ -153,6 +153,7 @@ Item {
                 text: Fmt.senderName(model)
                 Layout.fillWidth: true
                 elide: Text.ElideRight
+                foreground: row.unread ? Hues.brightForeground : Hues.lightForeground
                 dim: !row.unread
                 font.bold: row.unread
               }
@@ -160,7 +161,7 @@ Item {
               UiText {
                 visible: model.importance === "high"
                 text: "!"
-                foreground: Color.urgent
+                foreground: Hues.red
                 font.bold: true
                 font.pixelSize: Style.font.caption
               }
@@ -168,13 +169,13 @@ Item {
               UiText {
                 visible: model.has_attachments === true
                 text: "\uf0c6"
-                dim: true
+                foreground: Hues.cyan
                 font.pixelSize: Style.font.caption
               }
 
               UiText {
                 text: Fmt.listDate(model.received_at)
-                dim: true
+                foreground: row.unread ? Hues.blue : Hues.muted
                 font.pixelSize: Style.font.caption
               }
             }
@@ -183,7 +184,8 @@ Item {
               text: model.subject || "(no subject)"
               Layout.fillWidth: true
               elide: Text.ElideRight
-              dim: true
+              foreground: Hues.lightForeground
+              dim: !row.unread
               font.pixelSize: Style.font.bodySmall
             }
 

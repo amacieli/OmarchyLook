@@ -23,13 +23,17 @@ IDs are stable (never reused). Status: `open` | `investigating` | `planned` | `i
   once to get a stack if it recurs. Find the source of the `Pixel size <= 0` warnings.
 - **Note:** to kill it, use the PID of `quickshell -p /opt/omalook/qml`, never `pkill quickshell` (that is also the Omarchy desktop shell).
 
-### OL-002 — HTML rendering is not correct (open)
-- **Seen:** 2026-10-07, user report: HTML message view "doesn't seem to work quite correctly". Specifics not yet collected.
-- **Context:** HTML view is Qt `Text.RichText` (HTML4 subset, no CSS layout) fed by `Fmt.sanitizeHtml` in `qml/mail/format.js`
-  (`qml/mail/MessagePreview.qml:338`). Known limits of that engine: no flexbox/float/most CSS, weak table sizing, no `<style>` blocks.
-- **To do:** collect 3-5 example messages that render wrongly (screenshot + expected); decide whether to improve the sanitiser
-  (inline CSS, table widths, image sizing) or switch the HTML pane to a real engine (QtWebEngine; unverified inside Quickshell,
-  see `PLAN-compose.md` Phase D). Possibly related to OL-001.
+### OL-004 — quickshell SIGSEGV opening HTML mail with remote images (fixed 2026-10-10)
+- **Seen:** crash report `~/.cache/quickshell/crashes/6v922t8npmt` (pid 3468927): SIGSEGV in `QUrl::resolved` <- `QTextDocument::resource` <- `QQuickText::resourceRequestFinished`, right after `Connection refused` / `QSslSocket: device not open` from the HTML `Text` in `MessagePreview.qml`.
+- **Cause:** Qt's `Text.RichText` fetches remote `<img>` (and `background=`) itself; the completion callback crashes when the request fails or the text has changed meanwhile. Marketing mail with tracking pixels triggers it.
+- **Fix:** `Fmt.sanitizeHtml` never passes Qt a remote URL any more: allowed remote images become `[alt]` links opened in the browser; `background`/`srcset`/`poster` attributes are stripped. data: images still render inline.
+
+### OL-002 — HTML rendering is not correct (fixed 2026-10-10 with a WebKitGTK helper)
+- **Cause:** Qt `Text.RichText` has no `border-radius`, `box-shadow`, inline-block layout or `<style>` support, so styled mail (Stripe receipts, newsletters) came out as flat boxes with collapsed columns.
+- **Fix:** `tools/render/omarchylook-render.c` (WebKitGTK 4.1, ~200 lines of C) renders the HTML to a PNG plus link boxes in its own process; `MessagePreview.qml` shows the PNG with a click area per link. A GTK widget cannot be embedded in a Quickshell window on Wayland, so a separate process is the embedding. Crash/hang/timeout (20 s) of the helper only means that message falls back to the Qt renderer; 3 failures disable the helper for the session.
+- **Isolation:** ephemeral WebKit data (no cookies/cache), page JS blocked (CSP `script-src 'none'` + only our own link query runs), navigation and popups denied, no remote loads unless `--images` (message/sender allowed).
+- **Build/ship:** `build.sh` compiles it to `bin/` when `webkit2gtk-4.1`, gtk3 and gcc exist (else a warning and Qt fallback); `--live` installs it to `/opt/omalook/bin`. Runtime needs `libwebkit2gtk-4.1` (Arch: `webkit2gtk-4.1`).
+- **Known limits:** no text selection in the WebKit view (use the System view to copy text); blocked remote images show as WebKit's empty image boxes; re-renders on every selection/resize (no cache yet).
 
 ### OL-003 — Make hyperlinks clickable in "system font" view (open)
 - **Seen:** 2026-10-07, user request. In system-font (plain) rendering, URLs in the body are not clickable.

@@ -148,6 +148,7 @@ FocusScope {
           }
 
           PaneFrame {
+            tint: Hues.blue
             visible: appState.currentView !== "mail"
             focused: appState.focusPane === "msg"
             hotkey: "\u00b2"

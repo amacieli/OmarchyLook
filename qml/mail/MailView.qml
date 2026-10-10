@@ -47,7 +47,7 @@ RowLayout {
     Layout.fillHeight: true
     active: root.app.composing
     visible: active
-    PaneFrame { focused: true; title: "compose"; visible: composeLoader.active }
+    PaneFrame { tint: Hues.yellow; focused: true; title: "compose"; visible: composeLoader.active }
     // The message to edit (a reply's recipients and quote, or one taken back with Undo) must be
     // in place when the pane is created, because it fills its fields as it completes. setSource
     // hands the values over at creation; assigning them in onLoaded would be too late.

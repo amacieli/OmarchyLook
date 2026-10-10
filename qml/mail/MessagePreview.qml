@@ -1,5 +1,7 @@
 import QtQuick
 import QtQuick.Controls
+import Quickshell
+import Quickshell.Io
 import QtQuick.Layouts
 import qs.Commons
 import qs.Ui
@@ -10,7 +12,7 @@ import "format.js" as Fmt
 Item {
   id: root
 
-  PaneFrame { focused: root.paneFocused; hotkey: root.hotkey; title: "message" }
+  PaneFrame { tint: Hues.green; focused: root.paneFocused; hotkey: root.hotkey; title: "message" }
 
   property var message: null
   property bool paneFocused: false
@@ -52,19 +54,160 @@ Item {
   }
 
   readonly property bool bodyReady: !!root.body && root.body.state === "ready"
-  // System view: always plain text, in the system font.
-  readonly property string plainText: !bodyReady ? ""
-    : (root.body.type === "html" ? Fmt.htmlToText(root.body.content) : root.body.content)
+  // Both views are produced off the GUI thread (RenderWorker.js) and only after the selection has
+  // rested for a moment, so holding a key down in the list never waits on a message body.
+  // Qt's rich-text layout of the finished HTML is the one step that must stay on the GUI thread.
   readonly property string statusText: !root.body ? ""
     : (root.body.state === "loading" ? "loading message…"
       : (root.body.state === "error" ? String(root.body.reason || "could not load the message body") : ""))
   // What is shown under a load error: the cached preview, if there is one.
   readonly property string fallbackText: !!root.body && root.body.state === "error" ? String(root.body.preview || "") : ""
-  // HTML view: only built while it is the one showing.
-  readonly property var rendered: {
-    if (!root.htmlMode || !root.bodyReady) return { html: "", blocked: 0 }
-    if (root.body.type !== "html") return { html: Fmt.textToHtml(root.body.content), blocked: 0 }
-    return Fmt.sanitizeHtml(root.body.content, Math.max(0, htmlScroll.width - Style.spacing.huge * 2), root.imagesAllowed)
+
+  property bool renderPending: false
+  property string plainText: ""
+  property var rendered: ({ html: "", blocked: 0 })
+  property int _seq: 0
+  readonly property real _htmlWidth: Math.max(0, htmlScroll.width - Style.spacing.huge * 2)
+
+  // ---- WebKit view -------------------------------------------------------------------------
+  // HTML mail is drawn by omarchylook-render (WebKitGTK, its own process, see tools/render): full
+  // CSS, rounded cards, remote images when allowed. It returns a PNG plus the link boxes. If the
+  // helper is missing or fails, the message falls back to Qt's rich-text renderer below.
+  readonly property string helperPath: Quickshell.env("QML_DIR") + "/../bin/omarchylook-render"
+  property bool webkitOk: false          // the helper exists
+  property int webkitFailures: 0
+  readonly property bool webkitBroken: webkitFailures >= 3   // stop trying this session
+  property bool shotFailed: false        // this message fell back to Qt
+  property bool shotPending: false
+  property string shotSource: ""
+  property var shotLinks: []
+  property real shotScale: 1
+  property real shotPixelWidth: 0
+  property real shotPixelHeight: 0
+  property color shotBg: "#ffffff"
+  property var _shotProc: null
+  readonly property bool shotShown: shotSource !== "" && !shotFailed
+  readonly property bool htmlBusy: renderPending || shotPending
+
+  FileView {
+    path: root.helperPath
+    printErrors: false
+    onLoaded: root.webkitOk = true
+    onLoadFailed: root.webkitOk = false
+  }
+
+  function _wantShot() {
+    return htmlMode && webkitOk && !webkitBroken && !shotFailed
+      && !!root.body && root.body.state === "ready" && root.body.type === "html"
+  }
+
+  function _stopShot() {
+    if (_shotProc) { var p = _shotProc; _shotProc = null; p.running = false; p.destroy(500) }
+  }
+
+  Component {
+    id: shotProcess
+    Process {
+      id: proc
+      property int seq: 0
+      property string payload: ""
+      property string outFile: ""
+      property bool gotOutput: false
+      stdinEnabled: true
+      onStarted: { write(payload); stdinEnabled = false }
+      stdout: StdioCollector {
+        onStreamFinished: {
+          if (proc.seq !== root._seq || root._shotProc !== proc) return
+          var r = null
+          try { r = JSON.parse(text) } catch (e) { r = null }
+          if (!r || !r.width) return   // onExited handles the failure
+          proc.gotOutput = true
+          root.shotScale = r.scale
+          root.shotPixelWidth = r.width
+          root.shotPixelHeight = r.height
+          root.shotLinks = r.links || []
+          root.shotBg = r.bg || "#ffffff"
+          root.shotSource = "file://" + proc.outFile
+          root.shotPending = false
+        }
+      }
+      onExited: function(code, status) {
+        proc.destroy(500)
+        if (proc.seq !== root._seq || root._shotProc !== proc) return
+        if (code === 0 && proc.gotOutput) return
+        // Failed (no display, timeout, crash): show this message with Qt's renderer instead.
+        root.webkitFailures++
+        root.shotFailed = true
+        root.shotPending = false
+        root._shotProc = null
+        worker.sendMessage({ seq: root._seq, type: String(root.body.type || "text"), content: String(root.body.content || ""),
+                             wantHtml: true, maxWidth: root._htmlWidth, allowRemote: root.imagesAllowed })
+      }
+    }
+  }
+
+  function _startShot() {
+    _stopShot()
+    var run = Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
+    var out = run + "/omarchylook-render-" + (_seq % 6) + ".png"
+    var args = [helperPath, "--width", String(Math.max(300, Math.floor(htmlScroll.availableWidth))),
+                "--scale", String(Math.max(1, Screen.devicePixelRatio)), "--out", out]
+    if (imagesAllowed) args.splice(1, 0, "--images")
+    var p = shotProcess.createObject(root, { seq: _seq, payload: String(root.body.content || ""), outFile: out, command: args })
+    _shotProc = p
+    p.running = true
+  }
+
+  // Anything that changes what is shown drops the old result at once and starts the settle timer;
+  // results of superseded requests are discarded when they arrive.
+  function _invalidate() {
+    _seq++
+    _stopShot()
+    plainText = ""
+    rendered = { html: "", blocked: 0 }
+    shotSource = ""
+    shotLinks = []
+    shotFailed = false
+    // Read the body itself: a change handler can run before `bodyReady` has re-evaluated.
+    var ready = !!root.body && root.body.state === "ready"
+    renderPending = ready
+    shotPending = _wantShot()
+    if (ready) settle.restart(); else settle.stop()
+  }
+  onBodyChanged: _invalidate()
+  onHtmlModeChanged: _invalidate()
+  onImagesAllowedChanged: _invalidate()
+  onWebkitOkChanged: if (htmlMode && !!root.body && root.body.state === "ready") _invalidate()
+  on_HtmlWidthChanged: if (htmlMode && !!root.body && root.body.state === "ready") _invalidate()
+
+  Timer {
+    id: settle
+    interval: 150
+    onTriggered: {
+      // The worker always runs: plain text for the system view, the Qt HTML (or at least the
+      // blocked-image count) for the HTML view.
+      worker.sendMessage({
+        seq: root._seq, type: String(root.body.type || "text"), content: String(root.body.content || ""),
+        wantHtml: root.htmlMode, maxWidth: root._htmlWidth, allowRemote: root.imagesAllowed
+      })
+      if (root._wantShot()) root._startShot()
+    }
+  }
+  WorkerScript {
+    id: worker
+    source: "RenderWorker.js"
+    onMessage: function(r) {
+      if (r.seq !== root._seq) return   // scrolled on: this message is no longer the one shown
+      root.plainText = r.plain
+      // With the WebKit view showing (or about to), Qt never lays the HTML out: only the count of
+      // blocked images is kept.
+      var qtHtml = (root.shotFailed || !root._wantShotIgnoringFailure()) ? r.html : ""
+      root.rendered = { html: qtHtml, blocked: r.blocked }
+      root.renderPending = false
+    }
+  }
+  function _wantShotIgnoringFailure() {
+    return htmlMode && webkitOk && !webkitBroken && !!root.body && root.body.type === "html"
   }
 
   // ---- empty state
@@ -106,6 +249,7 @@ Item {
       UiText {
         text: (root.message && root.message.subject) || "(no subject)"
         Layout.fillWidth: true
+        foreground: Hues.brightForeground
         wrapMode: Text.WordWrap
         font.pixelSize: Style.font.heading
         font.bold: true
@@ -119,14 +263,15 @@ Item {
           implicitWidth: chip.implicitWidth + Style.spacing.lg * 2
           implicitHeight: chip.implicitHeight + Style.spacing.sm * 2
           radius: Style.cornerRadius
-          color: Style.selectedFillFor(Color.accent, Color.accent)
-          borderSpec: Border.flat(Color.accent, Style.normalBorderWidth)
+          readonly property color hue: Hues.hueFor(root.message ? root.message.from_email : "")
+          color: Style.selectedFillFor(hue, hue)
+          borderSpec: Border.flat(hue, Style.normalBorderWidth)
 
           UiText {
             id: chip
             anchors.centerIn: parent
             text: Fmt.senderName(root.message)
-            foreground: Color.accent
+            foreground: parent.hue
             font.pixelSize: Style.font.caption
           }
         }
@@ -135,13 +280,13 @@ Item {
           text: root.message && root.message.from_email ? "<" + root.message.from_email + ">" : ""
           Layout.fillWidth: true
           elide: Text.ElideRight
-          dim: true
+          foreground: Hues.cyan
           font.pixelSize: Style.font.caption
         }
 
         UiText {
           text: Fmt.fullDate(root.message ? root.message.received_at : "")
-          dim: true
+          foreground: Hues.muted
           font.pixelSize: Style.font.caption
         }
       }
@@ -313,8 +458,8 @@ Item {
             bottomPadding: Style.spacing.huge * 1.3
             text: root.statusText !== ""
               ? root.statusText + (root.fallbackText !== "" ? "\n\n" + root.fallbackText : "")
-              : root.plainText
-            dim: root.statusText !== ""
+              : (root.renderPending ? "rendering…" : root.plainText)
+            dim: root.statusText !== "" || root.renderPending
             wrapMode: Text.WordWrap
             lineHeight: 1.4
           }
@@ -386,11 +531,41 @@ Item {
           Rectangle {
             id: page
             width: htmlScroll.availableWidth
-            height: Math.max(htmlScroll.height, pageColumn.implicitHeight + Style.spacing.huge * 2)
-            color: "#ffffff"
+            height: root.shotShown ? Math.max(htmlScroll.height, shot.height) : Math.max(htmlScroll.height, pageColumn.implicitHeight + Style.spacing.huge * 2)
+            color: root.shotShown ? root.shotBg : "#ffffff"
+
+            // WebKit render: the PNG at pane width, with a click area over each link.
+            Item {
+              id: shot
+              visible: root.shotShown
+              width: page.width
+              height: root.shotPixelWidth > 0 ? Math.round(width * root.shotPixelHeight / root.shotPixelWidth) : 0
+              readonly property real k: root.shotPixelWidth > 0 ? width / root.shotPixelWidth : 1
+
+              Image {
+                anchors.fill: parent
+                source: root.shotSource
+                cache: false
+                smooth: true
+                fillMode: Image.Stretch
+              }
+              Repeater {
+                model: root.shotLinks
+                MouseArea {
+                  required property var modelData
+                  x: modelData.x * root.shotScale * shot.k
+                  y: modelData.y * root.shotScale * shot.k
+                  width: modelData.w * root.shotScale * shot.k
+                  height: modelData.h * root.shotScale * shot.k
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: Qt.openUrlExternally(modelData.href)
+                }
+              }
+            }
 
             ColumnLayout {
               id: pageColumn
+              visible: !root.shotShown
               x: Style.spacing.huge
               y: Style.spacing.huge
               width: parent.width - Style.spacing.huge * 2
@@ -399,7 +574,7 @@ Item {
               Text {
                 id: htmlText
                 Layout.fillWidth: true
-                visible: root.statusText === ""
+                visible: root.statusText === "" && !root.htmlBusy
                 textFormat: Text.RichText
                 wrapMode: Text.Wrap
                 color: "#000000"
@@ -411,9 +586,9 @@ Item {
               }
 
               Text {
-                visible: root.statusText !== ""
+                visible: root.statusText !== "" || root.htmlBusy
                 Layout.fillWidth: true
-                text: root.statusText + (root.fallbackText !== "" ? "\n\n" + root.fallbackText : "")
+                text: root.statusText !== "" ? root.statusText + (root.fallbackText !== "" ? "\n\n" + root.fallbackText : "") : "rendering…"
                 color: "#777777"
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body

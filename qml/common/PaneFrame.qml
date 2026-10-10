@@ -15,10 +15,12 @@ Item {
   property bool focused: false
   property string title: ""
   property string hotkey: ""
+  // The pane's own hue (a Hues colour), as btop gives each box one. Dimmed until focused.
+  property color tint: Color.accent
 
   property color lineColor: focused
-    ? Color.accent
-    : Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.30)
+    ? tint
+    : Qt.rgba(tint.r, tint.g, tint.b, 0.45)
   readonly property int lw: focused ? 2 : 1
   readonly property real edgeY: Math.round(labelText.implicitHeight / 2)
   readonly property real gapStart: Style.spacing.xl

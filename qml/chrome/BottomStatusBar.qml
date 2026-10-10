@@ -63,6 +63,7 @@ Item {
 
     UiText {
       text: root.currentView === "mail" ? root.viewLabel + " › " + root.folderName : root.viewLabel
+      foreground: Hues.brightForeground
       font.pixelSize: Style.font.caption
       font.bold: true
     }
@@ -70,7 +71,7 @@ Item {
     UiText {
       visible: root.currentView === "mail" && root.markCount > 0
       text: root.markCount + " marked"
-      foreground: Color.accent
+      foreground: Hues.yellow
       font.bold: true
       font.pixelSize: Style.font.caption
     }
@@ -94,13 +95,13 @@ Item {
     UiText {
       text: root.pendingText !== "" ? root.pendingHelp : (root.notice !== "" ? root.notice : root.hints)
       dim: root.pendingText === "" && root.notice === ""
-      foreground: root.pendingText !== "" ? Color.accent : (root.notice !== "" ? Color.urgent : Color.foreground)
+      foreground: root.pendingText !== "" ? Hues.cyan : (root.notice !== "" ? Hues.yellow : Color.foreground)
       font.pixelSize: Style.font.caption
     }
 
     UiText {
       text: "  " + (root.keyOf("palette") || ":") + "  commands   " + (root.keyOf("help") || "?") + "  help"
-      color: Color.accent
+      color: Hues.cyan
       font.pixelSize: Style.font.caption
       font.bold: true
     }
@@ -108,14 +109,14 @@ Item {
     UiText {
       visible: !root.isAuthenticated
       text: "signed out (" + (root.keyOf("go.accounts") || "g a") + " accounts)"
-      color: Color.urgent
+      color: Hues.red
       font.pixelSize: Style.font.caption
       font.bold: true
     }
 
     UiText {
       text: root.backendOnline ? "online" : "offline"
-      color: root.backendOnline ? Color.accent : Color.urgent
+      color: root.backendOnline ? Hues.green : Hues.red
       font.pixelSize: Style.font.caption
       font.bold: true
     }

@@ -8,7 +8,7 @@ import "../common"
 Item {
   id: root
 
-  PaneFrame { focused: root.paneFocused; hotkey: "\u00b2"; title: "folders" }
+  PaneFrame { tint: Hues.cyan; focused: root.paneFocused; hotkey: "\u00b2"; title: "folders" }
 
   property var model
   property int currentIndex: 0
@@ -80,7 +80,7 @@ Item {
         width: list.width
         topPadding: Style.spacing.sm
         text: section
-        dim: true
+        foreground: Hues.muted
         elide: Text.ElideRight
         font.pixelSize: Style.font.caption
       }
@@ -106,7 +106,8 @@ Item {
           anchors.rightMargin: Style.spacing.controlPaddingX
           anchors.verticalCenter: parent.verticalCenter
           text: model.unread_item_count > 99 ? "99+" : String(model.unread_item_count)
-          dim: true
+          foreground: Hues.blue
+          font.bold: true
           font.pixelSize: Style.font.caption
         }
       }
