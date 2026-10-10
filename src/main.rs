@@ -562,7 +562,25 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                             }).unwrap()
                             .filter_map(|r| r.ok())
                             .collect();
-                            format!("[{}]", rows.join(","))
+                            // "<Kind> - all accounts" rows go first: one per folder kind that two or
+                            // more accounts have. Their account_id is empty, so move targets skip them.
+                            let mut all_rows: Vec<String> = Vec::new();
+                            if account.is_none() {
+                                if let Ok(aggs) = omarchylook::db::all_accounts_folders(&conn) {
+                                    for a in aggs {
+                                        all_rows.push(format!(
+                                            "{{\"id\":{},\"display_name\":{},\"unread_item_count\":{},\"well_known_name\":{},\"total_item_count\":{},\"account_id\":\"\",\"account_email\":\"All accounts\",\"all_accounts\":true}}",
+                                            serde_json::to_string(&format!("all:{}", a.well_known_name)).unwrap(),
+                                            serde_json::to_string(omarchylook::db::all_accounts_label(&a.well_known_name)).unwrap(),
+                                            a.unread_item_count,
+                                            serde_json::to_string(&a.well_known_name).unwrap(),
+                                            a.total_item_count,
+                                        ));
+                                    }
+                                }
+                            }
+                            all_rows.extend(rows);
+                            format!("[{}]", all_rows.join(","))
                         }
                         Err(e) => {
                             warn!("GET /folders: DB open failed: {}", e);
@@ -1026,6 +1044,7 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                                     "importance": row.get::<_, Option<String>>(13)?.unwrap_or_default(),
                                     "has_attachments": row.get::<_, Option<bool>>(14)?.unwrap_or(false),
                                     "conversation_id": row.get::<_, Option<String>>(15)?.unwrap_or_default(),
+                                    "folder_id": row.get::<_, String>(16)?,
                                 }).to_string())
                             };
 
@@ -1043,8 +1062,14 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                             let mut conds: Vec<String> = Vec::new();
                             let mut args: Vec<rusqlite::types::Value> = Vec::new();
                             if let Some(ref fid) = folder_id {
-                                args.push(fid.clone().into());
-                                conds.push(format!("m.folder_id = ?{}", args.len()));
+                                // "all:<kind>" = that kind of folder across every account (Inbox - all accounts).
+                                if let Some(kind) = fid.strip_prefix("all:") {
+                                    args.push(kind.to_string().into());
+                                    conds.push(format!("m.folder_id IN (SELECT id FROM folders WHERE well_known_name = ?{})", args.len()));
+                                } else {
+                                    args.push(fid.clone().into());
+                                    conds.push(format!("m.folder_id = ?{}", args.len()));
+                                }
                             }
                             if let Some(acct) = query_param(first_line, "account") {
                                 args.push(acct.into());
@@ -1060,7 +1085,7 @@ fn start_http_trigger_server(config_dir: &PathBuf) {
                                 "SELECT m.id, m.subject, m.from_email, m.from_name, m.received_at, m.is_read, \
                                         COALESCE(m.account_id, ''), COALESCE(a.email, ''), \
                                         m.to_text, m.cc_text, m.bcc_text, m.sent_at, m.categories, m.importance, \
-                                        m.has_attachments, m.conversation_id \
+                                        m.has_attachments, m.conversation_id, COALESCE(m.folder_id, '') \
                                  FROM messages m LEFT JOIN accounts a ON a.id = m.account_id{} \
                                  ORDER BY m.received_at DESC LIMIT ?{} OFFSET ?{}",
                                 where_sql, args.len() - 1, args.len()

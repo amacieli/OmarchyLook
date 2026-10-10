@@ -425,19 +425,34 @@ Item {
         var folders = JSON.parse(xhr.responseText)
         folderModelObj.clear()
         for (var i = 0; i < folders.length; i++) folderModelObj.append(folders[i])
-        if (root.selectedFolderId === "" && folderModelObj.count > 0)
-          root.selectedFolderId = folderModelObj.get(0).id
+        if (root.selectedFolderId === "") {
+          for (var k = 0; k < folderModelObj.count; k++)
+            if (!folderModelObj.get(k).all_accounts) { root.selectedFolderId = folderModelObj.get(k).id; break }
+        }
       } catch (e) { console.log("[Folders] parse error:", e) }
     })
   }
 
   // Folder rows carry the unread count the status bar shows; nudge it locally so it
   // follows a toggle straight away (the next folder sync replaces it with the provider's).
+  // Bumps the folder's own row and, when it has one, the "<Kind> - all accounts" row that
+  // sums it, so the count is right whichever of the two is on screen.
   function _bumpFolderUnread(folderId, delta) {
+    var kind = "", aggId = ""
     for (var i = 0; i < folderModelObj.count; i++) {
       var f = folderModelObj.get(i)
-      if (f.id === folderId) {
+      if (f.id === folderId && !f.all_accounts) {
         folderModelObj.setProperty(i, "unread_item_count", Math.max(0, (f.unread_item_count || 0) + delta))
+        kind = String(f.well_known_name || "")
+        break
+      }
+    }
+    if (kind === "") return
+    aggId = "all:" + kind
+    for (var j = 0; j < folderModelObj.count; j++) {
+      var g = folderModelObj.get(j)
+      if (g.id === aggId) {
+        folderModelObj.setProperty(j, "unread_item_count", Math.max(0, (g.unread_item_count || 0) + delta))
         return
       }
     }
@@ -679,15 +694,16 @@ Item {
     var id = m.id
     var wasRead = !!m.is_read
     var delta = wasRead ? 1 : -1
+    var fid = m.folder_id || selectedFolderId
     _setRead(i, !wasRead)
-    _bumpFolderUnread(selectedFolderId, delta)
+    _bumpFolderUnread(fid, delta)
     request("POST", "/messages/read?id=" + encodeURIComponent(id) + "&read=" + (!wasRead), function(xhr) {
       if (xhr.status === 200 && xhr.responseText === "ok") return
       // Roll back — the list may have been reloaded meanwhile, so find the row by id.
       for (var j = 0; j < messageModelObj.count; j++) {
         if (messageModelObj.get(j).id === id) { root._setRead(j, wasRead); break }
       }
-      root._bumpFolderUnread(root.selectedFolderId, -delta)
+      root._bumpFolderUnread(fid, -delta)
     })
   }
 
@@ -890,7 +906,7 @@ Item {
   // "Inbox" or, with several accounts, "Inbox · adam@example.com".
   readonly property string selectedFolderLabel: {
     var f = selectedFolder
-    if (!f) return selectedFolderName
+    if (!f || f.all_accounts) return selectedFolderName
     var accounts = {}, n = 0
     for (var i = 0; i < folderModelObj.count; i++) {
       var e = folderModelObj.get(i).account_email || ""
@@ -1133,14 +1149,18 @@ Item {
     ids.forEach(function(id) { set[id] = true })
 
     // Hide the rows now; the cursor keeps its place so the next message takes over.
-    var unread = 0
+    var unread = 0, unreadBy = {}
     for (var i = messageModelObj.count - 1; i >= 0; i--) {
       var row = messageModelObj.get(i)
       if (!set[row.id]) continue
-      if (!row.is_read) unread++
+      if (!row.is_read) {
+        unread++
+        var rf = row.folder_id || selectedFolderId
+        unreadBy[rf] = (unreadBy[rf] || 0) + 1
+      }
       messageModelObj.remove(i)
     }
-    if (unread > 0) _bumpFolderUnread(selectedFolderId, -unread)
+    for (var uf in unreadBy) _bumpFolderUnread(uf, -unreadBy[uf])
     if (msgIndex >= messageModelObj.count) msgIndex = Math.max(0, messageModelObj.count - 1)
     clearMarks()
 
@@ -1156,7 +1176,7 @@ Item {
         return
       }
       if (res.delay_secs > 0)
-        root.lastAction = { ids: ids, label: verb + " " + _noun(ids.length), unread: unread, until: Date.now() + res.delay_secs * 1000 }
+        root.lastAction = { ids: ids, label: verb + " " + _noun(ids.length), unread: unread, unreadBy: unreadBy, until: Date.now() + res.delay_secs * 1000 }
       else root.lastAction = null
       root.actionNow = Date.now()
     })
@@ -1168,7 +1188,7 @@ Item {
     if (!a) return false
     lastAction = null
     request("POST", "/messages/action/undo?ids=" + encodeURIComponent(a.ids.join(",")), function(xhr) {
-      if (a.unread > 0) _bumpFolderUnread(selectedFolderId, a.unread)
+      for (var uf in a.unreadBy) _bumpFolderUnread(uf, a.unreadBy[uf])
       loadMessages()
       notify("Restored " + _noun(a.ids.length))
     })

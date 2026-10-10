@@ -8,6 +8,53 @@ use log::{debug, info, warn};
 use rusqlite::{Connection, params, OptionalExtension};
 use chrono::Utc;
 
+/// Folder kinds that get an "all accounts" row when two or more accounts have one.
+/// Only names that mean the same thing across providers (Graph and Gmail well-known names).
+pub const ALL_ACCOUNTS_KINDS: &[&str] = &["inbox", "drafts", "sentitems", "deleteditems", "junkemail", "archive"];
+
+/// Display label of an all-accounts row, e.g. "Inbox - all accounts".
+pub fn all_accounts_label(well_known: &str) -> &'static str {
+    match well_known {
+        "inbox" => "Inbox - all accounts",
+        "drafts" => "Drafts - all accounts",
+        "sentitems" => "Sent - all accounts",
+        "deleteditems" => "Deleted - all accounts",
+        "junkemail" => "Junk - all accounts",
+        "archive" => "Archive - all accounts",
+        _ => "All accounts",
+    }
+}
+
+/// One all-accounts folder row: summed counts over every account's folder of that kind.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AllAccountsFolder {
+    pub well_known_name: String,
+    pub accounts: i64,
+    pub unread_item_count: i64,
+    pub total_item_count: i64,
+}
+
+/// Kinds that exist in at least two accounts, in ALL_ACCOUNTS_KINDS order, with summed counts.
+/// A kind held by only one account gets no row: it would just repeat that account's folder.
+pub fn all_accounts_folders(conn: &Connection) -> rusqlite::Result<Vec<AllAccountsFolder>> {
+    let mut stmt = conn.prepare(
+        "SELECT well_known_name, COUNT(DISTINCT account_id),
+                COALESCE(SUM(unread_item_count), 0), COALESCE(SUM(total_item_count), 0)
+         FROM folders
+         WHERE well_known_name IN ('inbox','drafts','sentitems','deleteditems','junkemail','archive')
+         GROUP BY well_known_name
+         HAVING COUNT(DISTINCT account_id) > 1",
+    )?;
+    let mut rows: Vec<AllAccountsFolder> = stmt.query_map([], |r| Ok(AllAccountsFolder {
+        well_known_name: r.get(0)?,
+        accounts: r.get(1)?,
+        unread_item_count: r.get(2)?,
+        total_item_count: r.get(3)?,
+    }))?.collect::<rusqlite::Result<_>>()?;
+    rows.sort_by_key(|f| ALL_ACCOUNTS_KINDS.iter().position(|k| *k == f.well_known_name));
+    Ok(rows)
+}
+
 /// How one sender's mail should be shown. Keyed by lower-cased address.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SenderPref {
@@ -1990,6 +2037,30 @@ mod recurrence_tests {
 #[cfg(test)]
 mod account_tests {
     use super::*;
+
+    #[test]
+    fn all_accounts_rows_sum_shared_kinds_only() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE folders (id TEXT PRIMARY KEY, display_name TEXT, unread_item_count INTEGER,
+            total_item_count INTEGER, well_known_name TEXT, account_id TEXT);").unwrap();
+        let rows = [
+            ("a:INBOX", 2, 10, "inbox", "a"),
+            ("b:INBOX", 3, 20, "inbox", "b"),
+            ("a:SENT", 0, 5, "sentitems", "a"),       // only one account has Sent: no row
+            ("a:Work", 1, 1, "", "a"),                // custom folder: never aggregated
+            ("b:Work", 1, 1, "", "b"),
+        ];
+        for (id, u, t, wk, acct) in rows {
+            conn.execute("INSERT INTO folders VALUES (?1, ?1, ?2, ?3, ?4, ?5)",
+                params![id, u, t, if wk.is_empty() { None } else { Some(wk) }, acct]).unwrap();
+        }
+        let got = all_accounts_folders(&conn).unwrap();
+        assert_eq!(got, vec![AllAccountsFolder { well_known_name: "inbox".into(), accounts: 2,
+            unread_item_count: 5, total_item_count: 30 }]);
+        assert_eq!(all_accounts_label("inbox"), "Inbox - all accounts");
+        assert_eq!(all_accounts_label("sentitems"), "Sent - all accounts");
+        assert_eq!(all_accounts_label("deleteditems"), "Deleted - all accounts");
+    }
 
     fn temp_db_path(name: &str) -> String {
         let dir = std::env::temp_dir().join(format!("omarchylook-test-{}-{}", name, std::process::id()));

@@ -107,7 +107,7 @@ Item {
       var name = String(f.display_name || "")
       if (name === "" || !_fz(q, name)) continue
       var unread = f.unread_item_count > 0 ? "  (" + f.unread_item_count + ")" : ""
-      var acct = f.account_email ? "  · " + f.account_email : ""
+      var acct = (f.account_email && !f.all_accounts) ? "  · " + f.account_email : ""
       out.push({ id: "folder." + i, title: name + acct + unread, keys: [], run: (function(idx) { return function() { app.gotoFolder(idx) } })(i) })
     }
     return out
@@ -116,7 +116,7 @@ Item {
   // Folders the selected messages can move to: same account, not the folder they are in.
   function pickMoveTargets(q) {
     var out = [], m = app.folderModel, cur = app.selectedFolder
-    if (!cur) return out
+    if (!cur || cur.all_accounts) return out   // moves are per account: not from the all-accounts view
     for (var i = 0; i < m.count; i++) {
       var f = m.get(i)
       if (f.account_id !== cur.account_id || f.id === cur.id) continue
